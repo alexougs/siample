@@ -4,7 +4,7 @@ Sampler-découpeur pour FL Studio (Mac et Windows) et Logic Pro : tu glisses un 
 
 Formats produits : VST3 (FL Studio Mac et Windows), Audio Unit (Logic Pro), et une application autonome pour tester sans DAW.
 
-## Ce que fait la version 0.2
+## Ce que fait la version 0.3
 
 **Découpe**
 - Chargement par glisser-déposer ou par le bouton « Charger un sample » (WAV, AIFF, FLAC, OGG, MP3, 15 minutes maximum).
@@ -19,7 +19,7 @@ Formats produits : VST3 (FL Studio Mac et Windows), Audio Unit (Logic Pro), et u
 **Jeu**
 - **Pads** : une note par tranche. **Clavier** : tout le clavier joue la tranche sélectionnée, comme un instrument.
 - **Mono** : chaque nouvelle note coupe la précédente.
-- Par tranche : volume, pan, pitch (demi-tons et accordage fin), **filtre** passe-bas / passe-haut, inversion, enveloppe ADSR, one-shot ou gate, groupe de choke.
+- Par tranche : volume, pan, pitch (demi-tons et accordage fin), **filtre** passe-bas / passe-haut, inversion, enveloppe ADSR, groupe de choke, et trois façons de jouer : **one-shot** (jusqu'au bout), **gate** (tant que la touche est tenue) ou **boucle** (la tranche se répète tant que la touche est tenue).
 - **Grain** : le son granuleux des vieux samplers, réglable de 0 à 100 %.
 
 **Boucle**
@@ -76,6 +76,7 @@ En mode Clavier, la note MIDI 60 (C5 dans FL Studio, C3 dans Logic Pro) joue la 
 
 - Siample enregistre **le chemin** du sample, pas le son lui-même. Si tu déplaces ou supprimes le fichier, le plugin affichera « Fichier introuvable » à la réouverture du projet ; ta découpe est conservée et revient dès que tu remets le fichier à sa place. Range donc tes samples dans un dossier stable avant de les charger.
 - Sans Sync, le pitch change aussi la durée de la tranche, comme sur une MPC.
+- En mode Boucle, la durée de la répétition est celle de la tranche : règle ses points de début et de fin pour que la boucle tombe juste. Avec Sync, une tranche qui dure un nombre rond de temps reste calée sur le projet.
 - Quand Sync est activé, Siample recalcule les tranches en arrière-plan à chaque changement de tempo, de pitch ou de découpe. Pendant ce calcul (« calcul en cours… »), les tranches pas encore prêtes se jouent à leur vitesse d'origine. À l'export, Siample attend la fin du calcul.
 - La détection du tempo peut se tromper d'un facteur deux sur les tempos très lents ou très rapides : c'est le rôle des boutons ÷2 et ×2.
 

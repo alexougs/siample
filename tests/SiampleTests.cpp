@@ -728,6 +728,81 @@ int main (int argc, char* argv[])
         check (std::abs (barely / dry - 1.0f) < 0.1f, "filtre presque au centre : son quasi inchange");
         t.setSliceParams (1, SliceParams());
 
+        // Boucle : la tranche se répète tant que la note est tenue
+        {
+            capture (t, 60);
+            auto looped = SliceParams();
+            looped.loop = true;
+            looped.release = 0.01f;
+            t.setSliceParams (0, looped);
+
+            const int blocksPerSecond = (int) (hostSr / 512.0);
+            auto held = capture (t, blocksPerSecond, noteOn (36));        // 1 s tenue, tranche de 0,25 s
+            bool alive = true;
+            for (int window = 0; window < 4; ++window)
+            {
+                const std::vector<float> part (held.begin() + window * (int) held.size() / 4, held.begin() + (window + 1) * (int) held.size() / 4);
+                alive = alive && rms (part) > 0.02f;
+            }
+            check (alive, "boucle : le son continue pendant 1 s pour une tranche de 0,25 s");
+
+            // Chaque passage est identique au premier (hors des fondus aux bords)
+            const int period = (int) (0.25 * hostSr);
+            float worst = 0.0f;
+            for (int i = 200; i < period - 200; ++i)
+                worst = juce::jmax (worst, std::abs (held[(size_t) i] - held[(size_t) (i + 2 * period)]));
+            check (worst < 0.02f, "boucle : le 3e passage est identique au 1er (ecart max " + juce::String (worst, 4) + ")");
+
+            float jump = 0.0f;
+            for (size_t i = 1; i < held.size(); ++i)
+                jump = juce::jmax (jump, std::abs (held[i] - held[i - 1]));
+            float reference = 0.0f;
+            for (int i = 1; i < period - 100; ++i)
+                reference = juce::jmax (reference, std::abs (held[(size_t) i] - held[(size_t) i - 1]));
+            check (jump <= reference * 1.05f + 1.0e-4f, "boucle : pas de clic au point de bouclage");
+
+            auto released = capture (t, 30, noteOff (36));
+            check (audibleSeconds (released, hostSr) < 0.03, "boucle : s'arrete au relachement -> " + juce::String (audibleSeconds (released, hostSr) * 1000.0, 1) + " ms");
+
+            // Pitch +12 : la boucle tourne deux fois plus vite
+            looped.pitch = 12;
+            t.setSliceParams (0, looped);
+            held = capture (t, blocksPerSecond, noteOn (36));
+            worst = 0.0f;
+            for (int i = 200; i < period / 2 - 200; ++i)
+                worst = juce::jmax (worst, std::abs (held[(size_t) i] - held[(size_t) (i + period)]));
+            check (worst < 0.02f, "boucle + pitch +12 : periode divisee par deux");
+            capture (t, 30, noteOff (36));
+
+            // Inversé + boucle
+            looped.pitch = 0;
+            looped.reverse = true;
+            t.setSliceParams (0, looped);
+            held = capture (t, blocksPerSecond, noteOn (36));
+            worst = 0.0f;
+            for (int i = 200; i < period - 200; ++i)
+                worst = juce::jmax (worst, std::abs (held[(size_t) i] - held[(size_t) (i + 2 * period)]));
+            check (worst < 0.02f && rms (held) > 0.02f, "boucle inversee : se repete aussi");
+            capture (t, 30, noteOff (36));
+
+            // Écoute à la souris : boucle tant que le bouton est tenu
+            t.audition (0, true);
+            held = capture (t, blocksPerSecond);
+            const std::vector<float> lastQuarter (held.end() - (int) held.size() / 4, held.end());
+            check (rms (lastQuarter) > 0.02f, "boucle : fonctionne aussi au clic sur un pad");
+            t.audition (0, false);
+            check (audibleSeconds (capture (t, 30), hostSr) < 0.03, "boucle : s'arrete quand on relache la souris");
+
+            // Sauvegarde
+            juce::MemoryBlock state;
+            t.getStateInformation (state);
+            SiampleProcessor other;
+            other.setStateInformation (state.getData(), (int) state.getSize());
+            check (other.getSlice (0).params.loop && ! other.getSlice (1).params.loop, "boucle : reglage restaure apres sauvegarde");
+
+            t.setSliceParams (0, SliceParams());
+        }
+
         // Grain
         capture (t, 60);
         const auto clean = capture (t, 60, noteOn (36));
@@ -924,7 +999,7 @@ int main (int argc, char* argv[])
                 case 0:  t.setSliceMode ((SliceMode) random.nextInt (3)); break;
                 case 1:  t.setDivisions (1 << (1 + random.nextInt (6))); break;
                 case 2:  t.setSensitivity (random.nextFloat()); break;
-                case 3:  { auto p = SliceParams(); p.pitch = random.nextInt (25) - 12; p.filter = random.nextFloat() * 2.0f - 1.0f; p.reverse = random.nextBool();
+                case 3:  { auto p = SliceParams(); p.pitch = random.nextInt (25) - 12; p.filter = random.nextFloat() * 2.0f - 1.0f; p.reverse = random.nextBool(); p.loop = random.nextBool();
                            t.setSliceParams (random.nextInt (juce::jmax (1, t.getNumSlices())), p); break; }
                 case 4:  head.bpm = 70.0 + random.nextInt (100); t.setSyncEnabled (random.nextBool()); break;
                 case 5:  t.addMarker (random.nextInt (loop.getNumSamples())); break;
@@ -1083,6 +1158,7 @@ int main (int argc, char* argv[])
         auto params = SliceParams();
         params.pitch = 5;
         params.filter = -0.4f;
+        params.loop = true;
         proc.setSelectedSlice (5);
         proc.setSliceParams (5, params);
         proc.waitForRendering (20000);

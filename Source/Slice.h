@@ -22,6 +22,7 @@ struct SliceParams
     float filter  = 0.0f;    // -1 .. 0 : passe-bas de plus en plus fermé ; 0 .. +1 : passe-haut
     bool  reverse = false;
     bool  oneShot = true;    // true : la tranche joue jusqu'au bout ; false : tant que la note est tenue
+    bool  loop    = false;   // true : la tranche se répète tant que la note est tenue (prend le pas sur oneShot)
     int   choke   = 0;       // 0 = aucun, 1..8 = groupe
 };
 

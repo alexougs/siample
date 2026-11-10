@@ -1335,6 +1335,7 @@ void SiampleProcessor::getStateInformation (juce::MemoryBlock& destData)
         child.setProperty ("filter",  s.params.filter, nullptr);
         child.setProperty ("reverse", s.params.reverse, nullptr);
         child.setProperty ("oneShot", s.params.oneShot, nullptr);
+        child.setProperty ("loop",    s.params.loop, nullptr);
         child.setProperty ("choke",   s.params.choke, nullptr);
         state.appendChild (child, nullptr);
     }
@@ -1423,6 +1424,7 @@ void SiampleProcessor::setStateInformation (const void* data, int sizeInBytes)
             s.params.filter  = juce::jlimit (-1.0f, 1.0f,   (float) child.getProperty ("filter", 0.0f));
             s.params.reverse = (bool) child.getProperty ("reverse", false);
             s.params.oneShot = (bool) child.getProperty ("oneShot", true);
+            s.params.loop    = (bool) child.getProperty ("loop", false);
             s.params.choke   = juce::jlimit (0, numChokeGroups, (int) child.getProperty ("choke", 0));
             restored.push_back (s);
         }

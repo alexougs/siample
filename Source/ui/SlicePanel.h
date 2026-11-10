@@ -76,7 +76,10 @@ public:
         gateButton.setButtonText ("Gate");
         gateButton.setTooltip (fr ("La tranche s'arrête quand tu relâches la touche (avec le temps de Release)"));
 
-        for (auto* b : { &oneShotButton, &gateButton })
+        loopButton.setButtonText ("Boucle");
+        loopButton.setTooltip (fr ("La tranche se répète tant que tu tiens la touche, puis s'arrête au relâchement"));
+
+        for (auto* b : { &oneShotButton, &gateButton, &loopButton })
         {
             b->setClickingTogglesState (true);
             b->setRadioGroupId (7102);
@@ -85,7 +88,8 @@ public:
         }
 
         oneShotButton.setConnectedEdges (juce::Button::ConnectedOnRight);
-        gateButton.setConnectedEdges (juce::Button::ConnectedOnLeft);
+        gateButton.setConnectedEdges (juce::Button::ConnectedOnLeft | juce::Button::ConnectedOnRight);
+        loopButton.setConnectedEdges (juce::Button::ConnectedOnLeft);
         oneShotButton.setToggleState (true, juce::dontSendNotification);
 
         reverseButton.setButtonText (fr ("Inversé"));
@@ -150,8 +154,9 @@ public:
             sustain.slider.setValue (p.sustain * 100.0, juce::dontSendNotification);
             release.slider.setValue (p.release * 1000.0, juce::dontSendNotification);
             filter.slider.setValue (p.filter * 100.0, juce::dontSendNotification);
-            oneShotButton.setToggleState (p.oneShot, juce::dontSendNotification);
-            gateButton.setToggleState (! p.oneShot, juce::dontSendNotification);
+            oneShotButton.setToggleState (p.oneShot && ! p.loop, juce::dontSendNotification);
+            gateButton.setToggleState (! p.oneShot && ! p.loop, juce::dontSendNotification);
+            loopButton.setToggleState (p.loop, juce::dontSendNotification);
             reverseButton.setToggleState (p.reverse, juce::dontSendNotification);
             chokeBox.setSelectedId (p.choke + 1, juce::dontSendNotification);
 
@@ -171,7 +176,7 @@ public:
         for (auto* k : getKnobs())
             k->setEnabled (enabled);
 
-        for (auto* c : std::initializer_list<juce::Component*> { &oneShotButton, &gateButton, &reverseButton, &chokeBox, &applyAllButton, &resetButton })
+        for (auto* c : std::initializer_list<juce::Component*> { &oneShotButton, &gateButton, &loopButton, &reverseButton, &chokeBox, &applyAllButton, &resetButton })
             c->setEnabled (enabled);
 
         repaint();
@@ -206,13 +211,14 @@ public:
 
         area.removeFromBottom (12);
         auto options = area.removeFromBottom (28);
-        oneShotButton.setBounds (options.removeFromLeft (84));
-        gateButton.setBounds (options.removeFromLeft (64));
+        oneShotButton.setBounds (options.removeFromLeft (80));
+        gateButton.setBounds (options.removeFromLeft (56));
+        loopButton.setBounds (options.removeFromLeft (68));
         options.removeFromLeft (12);
-        reverseButton.setBounds (options.removeFromLeft (84));
-        chokeBox.setBounds (options.removeFromRight (110));
+        reverseButton.setBounds (options.removeFromLeft (76));
+        chokeBox.setBounds (options.removeFromRight (104));
         options.removeFromRight (6);
-        chokeLabel.setBounds (options.removeFromRight (56));
+        chokeLabel.setBounds (options.removeFromRight (50));
 
         area.removeFromBottom (8);
         const int rowHeight = area.getHeight() / 2;
@@ -254,6 +260,7 @@ private:
         p.release = (float) (release.slider.getValue() / 1000.0);
         p.filter  = (float) (filter.slider.getValue() / 100.0);
         p.oneShot = oneShotButton.getToggleState();
+        p.loop    = loopButton.getToggleState();
         p.reverse = reverseButton.getToggleState();
         p.choke   = juce::jmax (0, chokeBox.getSelectedId() - 1);
         return p;
@@ -283,7 +290,7 @@ private:
     Knob sustain { "Sustain",   0.0, 100.0, 1.0, 100.0, " %", fr ("Niveau tenu après le Decay") };
     Knob release { "Release",   0.0, 3000.0, 1.0, 20.0, " ms", fr ("Temps d'extinction après le relâchement (mode Gate)") };
 
-    juce::TextButton oneShotButton, gateButton, reverseButton, applyAllButton, resetButton;
+    juce::TextButton oneShotButton, gateButton, loopButton, reverseButton, applyAllButton, resetButton;
     juce::Label chokeLabel;
     juce::ComboBox chokeBox;
 

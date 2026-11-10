@@ -29,6 +29,7 @@ struct Voice
     bool killing = false;
     bool oneShot = true;
     bool reverse = false;
+    bool looping = false;
 
     int slice = -1;
     int key   = -1;
@@ -63,7 +64,8 @@ struct Voice
         slice   = s.slice;
         key     = s.key;
         choke   = p.choke;
-        oneShot = p.oneShot;
+        looping = p.loop;
+        oneShot = p.oneShot && ! p.loop;   // une boucle s'arrête au relâchement, comme en mode gate
         reverse = p.reverse;
         source  = s.source;
         owner   = s.owner;
@@ -126,12 +128,23 @@ struct Voice
 
         for (int i = 0; i < numSamples; ++i)
         {
-            const double remaining = reverse ? (pos - (double) start + 1.0) : ((double) end - pos);
+            double remaining = reverse ? (pos - (double) start + 1.0) : ((double) end - pos);
 
             if (remaining <= 0.0)
             {
-                active = false;
-                return;
+                if (! looping)
+                {
+                    active = false;
+                    return;
+                }
+
+                // Boucle : on repart du début de la tranche, avec un mini-fondu d'entrée.
+                // (Le fondu de sortie juste avant le bord a déjà ramené le son à zéro : pas de clic.)
+                const double length = (double) (end - start);
+                pos += reverse ? length : -length;
+                pos = juce::jlimit ((double) start, (double) (end - 1), pos);
+                rampIn = 0.0f;
+                remaining = reverse ? (pos - (double) start + 1.0) : ((double) end - pos);
             }
 
             float g = adsr.getNextSample();
