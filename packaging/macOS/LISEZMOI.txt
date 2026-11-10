@@ -1,0 +1,25 @@
+SIAMPLE - installation sur Mac
+==============================
+
+1. Ouvre l'application Terminal (Applications > Utilitaires > Terminal).
+2. Tape le mot  bash  suivi d'un espace (sans appuyer sur Entrée).
+3. Glisse le fichier « installer.sh » de ce dossier dans la fenêtre du Terminal.
+4. Appuie sur Entrée.
+
+Le script copie Siample dans tes dossiers de plugins personnels et retire le
+blocage que macOS met sur les plugins téléchargés non signés par Apple.
+
+Ensuite :
+- FL Studio : Options > Manage plugins > Find installed plugins, puis ajoute
+  Siample depuis la liste « Installed > Generators > VST3 ».
+- Logic Pro : relance Logic, crée une piste d'instrument logiciel, puis
+  Instrument > AU Instruments > Siample > Siample.
+
+Installation à la main (si tu préfères) :
+- Siample.vst3       ->  ~/Library/Audio/Plug-Ins/VST3/
+- Siample.component  ->  ~/Library/Audio/Plug-Ins/Components/
+puis dans le Terminal :
+  xattr -cr ~/Library/Audio/Plug-Ins/VST3/Siample.vst3 ~/Library/Audio/Plug-Ins/Components/Siample.component
+
+Siample.app est la version autonome : elle sert à tester sans ouvrir de DAW.
+Pour l'ouvrir la première fois : clic droit > Ouvrir.

@@ -1,0 +1,11 @@
+SIAMPLE - installation sur Windows
+==================================
+
+1. Copie le dossier « Siample.vst3 » (le dossier entier) dans :
+      C:\Program Files\Common Files\VST3\
+2. Dans FL Studio : Options > Manage plugins > Find installed plugins.
+3. Ajoute Siample depuis la liste « Installed > Generators > VST3 ».
+
+Siample.exe est la version autonome : elle sert à tester sans ouvrir FL Studio.
+Windows peut afficher un avertissement au premier lancement, car le programme
+n'est pas signé : clique sur « Informations complémentaires » puis « Exécuter quand même ».
