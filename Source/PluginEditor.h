@@ -7,10 +7,12 @@
 #include "ui/WaveformView.h"
 #include "ui/PadGrid.h"
 #include "ui/SlicePanel.h"
-#include "ui/MidiDragButton.h"
+#include "ui/DragExportButton.h"
+#include "ui/SequenceLane.h"
 
 class SiampleEditor final : public juce::AudioProcessorEditor,
                             public juce::FileDragAndDropTarget,
+                            public juce::DragAndDropContainer,
                             private juce::ChangeListener,
                             private juce::Timer
 {
@@ -68,7 +70,13 @@ private:
     // Barre de boucle
     juce::Label loopLabel, loopInfoLabel;
     juce::TextButton listenButton, flipButton, originalButton;
-    siample::MidiDragButton midiDrag;
+    siample::DragExportButton midiDrag;
+
+    // Piste : des tranches enchaînées
+    juce::Label sequenceLabel, sequenceInfoLabel;
+    juce::TextButton sequenceListenButton, sequenceAddButton, sequenceClearButton;
+    siample::DragExportButton sequenceAudioDrag, sequenceMidiDrag;
+    siample::SequenceLane sequenceLane;
 
     siample::PadGrid pads;
     siample::SlicePanel slicePanel;
@@ -80,6 +88,7 @@ private:
     double shownHostBpm = 0.0;
     bool shownRendering = false;
     bool shownPlaying = false;
+    bool shownSequencePlaying = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SiampleEditor)
 };

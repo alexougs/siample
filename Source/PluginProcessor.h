@@ -135,6 +135,37 @@ public:
     juce::File createPatternMidiFile();
 
     //==============================================================================
+    // Piste : des tranches posées bout à bout, dans l'ordre que l'on veut (1, 1, 3…)
+    int getSequenceLength() const                { return sequenceLength; }
+    int getSequenceStep (int position) const     { return sequence[(size_t) position]; }
+    bool insertSequenceStep (int sliceIndex, int position = -1);   // -1 : à la fin
+    void removeSequenceStep (int position);
+    void moveSequenceStep (int from, int to);
+    void clearSequence();
+
+    bool isSequencePlaying() const               { return sequencePlaying.load(); }
+    void setSequencePlaying (bool shouldPlay);
+
+    /** Le pas de la piste en cours de lecture, ou -1. */
+    int getSequencePlayingStep() const           { return sequencePlayingStep.load (std::memory_order_relaxed); }
+
+    /** Durée d'une tranche telle qu'on l'entend (pitch et Sync compris), en secondes. */
+    double getSliceSeconds (int sliceIndex) const;
+    double getSequenceSeconds() const;
+
+    //==============================================================================
+    // Export : des fichiers temporaires, à glisser dans le DAW
+    /** La tranche avec tous ses réglages, en WAV. */
+    juce::File createSliceAudioFile (int sliceIndex);
+    /** La piste entière, en WAV. */
+    juce::File createSequenceAudioFile();
+    /** La piste en notes MIDI, une note par tranche. */
+    juce::File createSequenceMidiFile();
+
+    bool renderSliceAudio (int sliceIndex, juce::AudioBuffer<float>& result, bool withGrain = true);
+    bool renderSequenceAudio (juce::AudioBuffer<float>& result);
+
+    //==============================================================================
     // Écoute depuis l'interface (clic sur un pad ou sur la forme d'onde)
     void audition (int sliceIndex, bool noteOn);
 
@@ -196,6 +227,8 @@ private:
     void releaseKey (int key);
     void renderVoices (juce::AudioBuffer<float>& buffer, int startSample, int numSamples);
     void applyGrain (juce::AudioBuffer<float>& buffer);
+    double sliceSourceDuration (int sliceIndex) const;   // en échantillons du sample, telle qu'on l'entend
+    juce::File writeTempWav (const juce::AudioBuffer<float>& buffer, const juce::String& suffix);
 
     //==============================================================================
     juce::AudioFormatManager formatManager;
@@ -253,6 +286,15 @@ private:
     std::atomic<bool> patternPlaying { false };
     bool patternWasPlaying = false;
     double patternPosition = 0.0;
+
+    // Piste d'assemblage
+    std::array<int, siample::maxSequenceSteps> sequence {};
+    int sequenceLength = 0;
+    std::atomic<bool> sequencePlaying { false };
+    std::atomic<int> sequencePlayingStep { -1 };
+    bool sequenceWasPlaying = false;
+    int sequenceIndex = 0;
+    double sequenceCountdown = 0.0;
 
     // Grain vintage
     float grainPhase = 0.0f, grainHeldL = 0.0f, grainHeldR = 0.0f;

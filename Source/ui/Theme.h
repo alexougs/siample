@@ -35,6 +35,30 @@ namespace theme
     }
 }
 
+/** Une couleur stable par tranche, pour repérer ses répétitions sur la piste. */
+inline juce::Colour sliceColour (int sliceIndex)
+{
+    return juce::Colour::fromHSV (std::fmod (0.07f + (float) sliceIndex * 0.137f, 1.0f), 0.6f, 0.92f, 1.0f);
+}
+
+/** Petite vignette qui suit la souris quand on glisse une tranche vers la piste. */
+inline juce::ScaledImage makeSliceDragImage (int sliceIndex)
+{
+    juce::Image image (juce::Image::ARGB, 88, 88, true);
+    juce::Graphics g (image);
+    const juce::Rectangle<float> r (2.0f, 2.0f, 84.0f, 84.0f);
+
+    g.setColour (theme::panelLight.withAlpha (0.92f));
+    g.fillRoundedRectangle (r, 12.0f);
+    g.setColour (theme::accent);
+    g.drawRoundedRectangle (r, 12.0f, 3.0f);
+    g.setColour (theme::text);
+    g.setFont (theme::font (38.0f, true));
+    g.drawText (juce::String (sliceIndex + 1), r, juce::Justification::centred, false);
+
+    return juce::ScaledImage (image, 2.0);
+}
+
 class SiampleLookAndFeel final : public juce::LookAndFeel_V4
 {
 public:

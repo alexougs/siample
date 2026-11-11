@@ -58,6 +58,8 @@ namespace grid
 /** Identifiants de voix qui ne viennent pas d'une note MIDI. */
 constexpr int uiKeyBase  = 1000;   // écoute depuis l'interface : 1000 + numéro de tranche
 constexpr int patternKey = 2000;   // lecture interne de la boucle
+constexpr int sequenceKey = 2001;  // lecture de la piste d'assemblage
+constexpr int maxSequenceSteps = 64;
 constexpr int keyboardRootNote = 60;
 
 } // namespace siample

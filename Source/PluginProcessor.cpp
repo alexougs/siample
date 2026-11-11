@@ -10,7 +10,36 @@ namespace
     constexpr int minRegionLength = 1024;
     constexpr double minBpm = 30.0, maxBpm = 300.0;
 
-    enum EventType { noteOnEvent = 0, noteOffEvent, allOffEvent, patternEvent };
+    enum EventType { noteOnEvent = 0, noteOffEvent, allOffEvent, patternEvent, sequenceEvent };
+
+    /** Grain des vieux samplers : fréquence d'échantillonnage réduite + moins de bits. */
+    void processGrain (juce::AudioBuffer<float>& buffer, float amount, double rate,
+                       float& phase, float& heldL, float& heldR)
+    {
+        if (amount < 0.005f || buffer.getNumChannels() == 0)
+            return;
+
+        const float hold   = (1.0f + amount * amount * 9.0f) * (float) (rate / 44100.0);
+        const float levels = std::pow (2.0f, 15.0f - 8.0f * amount);
+
+        float* left  = buffer.getWritePointer (0);
+        float* right = buffer.getNumChannels() > 1 ? buffer.getWritePointer (1) : left;
+
+        for (int i = 0; i < buffer.getNumSamples(); ++i)
+        {
+            phase += 1.0f;
+
+            if (phase >= hold)
+            {
+                phase -= hold;
+                heldL = std::round (left[i] * levels) / levels;
+                heldR = std::round (right[i] * levels) / levels;
+            }
+
+            left[i]  = heldL;
+            right[i] = heldR;
+        }
+    }
 }
 
 //==============================================================================
@@ -284,10 +313,12 @@ void SiampleProcessor::installSample (SampleData::Ptr newSample)
             patternSlices[(size_t) i] = i;
 
         patternFlipped = false;
+        sequenceLength = 0;
     }
 
     // l'ancien sample et ses tranches étirées sont libérés ici, hors du verrou
     patternPlaying.store (false);
+    sequencePlaying.store (false);
     candidates.clear();
     analysisValid = false;
     selectedSlice = 0;
@@ -512,6 +543,21 @@ void SiampleProcessor::applyPositions (const std::vector<int>& positions)
 void SiampleProcessor::slicesChanged()
 {
     selectedSlice = juce::jlimit (0, juce::jmax (0, numSlices - 1), selectedSlice.load());
+
+    // La piste ne garde que les tranches qui existent encore
+    {
+        const juce::SpinLock::ScopedLockType lock (audioLock);
+        int kept = 0;
+
+        for (int i = 0; i < sequenceLength; ++i)
+            if (sequence[(size_t) i] < numSlices)
+                sequence[(size_t) kept++] = sequence[(size_t) i];
+
+        sequenceLength = kept;
+    }
+
+    if (sequenceLength == 0)
+        sequencePlaying.store (false);
 
     // Un réarrangement ne vaut que pour la découpe sur laquelle il a été fait
     resetPattern();
@@ -882,6 +928,9 @@ void SiampleProcessor::flipPattern()
 void SiampleProcessor::setPatternPlaying (bool shouldPlay)
 {
     patternPlaying.store (shouldPlay && sample != nullptr && numSlices > 0);
+
+    if (patternPlaying.load())
+        sequencePlaying.store (false);
 }
 
 juce::File SiampleProcessor::createPatternMidiFile()
@@ -893,7 +942,7 @@ juce::File SiampleProcessor::createPatternMidiFile()
     const int origin = slices[0].start;
     const double ticksPerSample = sampleBpm / 60.0 / sample->sampleRate * (double) ticksPerBeat;
 
-    juce::MidiMessageSequence sequence;
+    juce::MidiMessageSequence notes;
 
     for (int i = 0; i < numSlices; ++i)
     {
@@ -901,19 +950,360 @@ juce::File SiampleProcessor::createPatternMidiFile()
         const double off = juce::jmax (on + 1.0, (double) (getSliceEnd (i) - origin) * ticksPerSample - 1.0);
         const int note = juce::jlimit (0, 127, baseNote + patternSlices[(size_t) i]);
 
-        sequence.addEvent (juce::MidiMessage::noteOn (1, note, (juce::uint8) 100), std::round (on));
-        sequence.addEvent (juce::MidiMessage::noteOff (1, note), std::round (off));
+        notes.addEvent (juce::MidiMessage::noteOn (1, note, (juce::uint8) 100), std::round (on));
+        notes.addEvent (juce::MidiMessage::noteOff (1, note), std::round (off));
     }
 
-    sequence.sort();
-    sequence.updateMatchedPairs();
+    notes.sort();
+    notes.updateMatchedPairs();
 
     juce::MidiFile midi;
     midi.setTicksPerQuarterNote (ticksPerBeat);
-    midi.addTrack (sequence);
+    midi.addTrack (notes);
 
     const auto name = "Siample - " + sample->file.getFileNameWithoutExtension()
                     + (patternFlipped ? " (flip)" : "") + ".mid";
+    auto file = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                    .getChildFile (juce::File::createLegalFileName (name));
+
+    file.deleteFile();
+
+    if (auto stream = file.createOutputStream())
+    {
+        if (midi.writeTo (*stream))
+        {
+            stream->flush();
+            return file;
+        }
+    }
+
+    return {};
+}
+
+//==============================================================================
+bool SiampleProcessor::insertSequenceStep (int sliceIndex, int position)
+{
+    if (sliceIndex < 0 || sliceIndex >= numSlices || sequenceLength >= maxSequenceSteps)
+        return false;
+
+    position = position < 0 ? sequenceLength : juce::jmin (position, sequenceLength);
+
+    const juce::SpinLock::ScopedLockType lock (audioLock);
+
+    for (int i = sequenceLength; i > position; --i)
+        sequence[(size_t) i] = sequence[(size_t) i - 1];
+
+    sequence[(size_t) position] = sliceIndex;
+    ++sequenceLength;
+    return true;
+}
+
+void SiampleProcessor::removeSequenceStep (int position)
+{
+    if (position < 0 || position >= sequenceLength)
+        return;
+
+    {
+        const juce::SpinLock::ScopedLockType lock (audioLock);
+
+        for (int i = position; i < sequenceLength - 1; ++i)
+            sequence[(size_t) i] = sequence[(size_t) i + 1];
+
+        --sequenceLength;
+    }
+
+    if (sequenceLength == 0)
+        sequencePlaying.store (false);
+}
+
+void SiampleProcessor::moveSequenceStep (int from, int to)
+{
+    if (from < 0 || from >= sequenceLength)
+        return;
+
+    to = juce::jlimit (0, sequenceLength - 1, to);
+
+    if (from == to)
+        return;
+
+    const juce::SpinLock::ScopedLockType lock (audioLock);
+    const int moved = sequence[(size_t) from];
+
+    if (from < to)
+        for (int i = from; i < to; ++i)
+            sequence[(size_t) i] = sequence[(size_t) i + 1];
+    else
+        for (int i = from; i > to; --i)
+            sequence[(size_t) i] = sequence[(size_t) i - 1];
+
+    sequence[(size_t) to] = moved;
+}
+
+void SiampleProcessor::clearSequence()
+{
+    {
+        const juce::SpinLock::ScopedLockType lock (audioLock);
+        sequenceLength = 0;
+    }
+
+    sequencePlaying.store (false);
+}
+
+void SiampleProcessor::setSequencePlaying (bool shouldPlay)
+{
+    sequencePlaying.store (shouldPlay && sample != nullptr && sequenceLength > 0);
+
+    if (sequencePlaying.load())
+        patternPlaying.store (false);
+}
+
+double SiampleProcessor::sliceSourceDuration (int sliceIndex) const
+{
+    if (sliceIndex < 0 || sliceIndex >= numSlices)
+        return 0.0;
+
+    const auto& s = slices[(size_t) sliceIndex];
+    const double length = (double) (getSliceEnd (sliceIndex) - s.start);
+
+    // Avec Sync, la durée suit le tempo du projet ; sinon c'est le pitch qui la change
+    if (syncActive)
+        return length * stretchRatio;
+
+    return length / std::pow (2.0, ((double) s.params.pitch + (double) s.params.fine / 100.0) / 12.0);
+}
+
+double SiampleProcessor::getSliceSeconds (int sliceIndex) const
+{
+    return sample != nullptr ? sliceSourceDuration (sliceIndex) / sample->sampleRate : 0.0;
+}
+
+double SiampleProcessor::getSequenceSeconds() const
+{
+    double total = 0.0;
+
+    for (int i = 0; i < sequenceLength; ++i)
+        total += getSliceSeconds (sequence[(size_t) i]);
+
+    return total;
+}
+
+//==============================================================================
+bool SiampleProcessor::renderSliceAudio (int sliceIndex, juce::AudioBuffer<float>& result, bool withGrain)
+{
+    const SampleData::Ptr source = sample;
+
+    if (source == nullptr || sliceIndex < 0 || sliceIndex >= numSlices)
+        return false;
+
+    if (syncEnabled)
+        worker->waitUntilIdle (10000);
+
+    const auto& s = slices[(size_t) sliceIndex];
+    const int sliceStart = s.start;
+    const int sliceEnd   = juce::jmin (getSliceEnd (sliceIndex), source->buffer.getNumSamples());
+
+    if (sliceEnd - sliceStart < 4)
+        return false;
+
+    RenderedSlice::Ptr stretched;
+    double ratio = 1.0;
+
+    {
+        const juce::SpinLock::ScopedLockType lock (audioLock);
+
+        if (syncActive)
+            stretched = rendered[(size_t) sliceIndex];
+
+        ratio = stretchRatio;
+    }
+
+    // À l'export, la tranche est toujours jouée en entier, une seule fois
+    SliceParams params = s.params;
+    params.oneShot = true;
+    params.loop = false;
+
+    VoiceStart start;
+    start.slice    = sliceIndex;
+    start.params   = &params;
+    start.velocity = 1.0f;
+    start.hostRate = source->sampleRate;
+    start.originalStart = sliceStart;
+    start.originalEnd   = sliceEnd;
+
+    if (stretched != nullptr && stretched->matches (sliceStart, getSliceEnd (sliceIndex), params.pitch, params.fine, ratio))
+    {
+        start.source = &stretched->buffer;
+        start.start  = 0;
+        start.end    = stretched->buffer.getNumSamples();
+        start.rate   = 1.0;
+    }
+    else
+    {
+        start.source = &source->buffer;
+        start.start  = sliceStart;
+        start.end    = sliceEnd;
+        start.rate   = std::pow (2.0, ((double) params.pitch + (double) params.fine / 100.0) / 12.0);
+    }
+
+    const int length = juce::jmax (1, (int) std::ceil ((double) (start.end - start.start) / start.rate));
+    result.setSize (2, length);
+    result.clear();
+
+    Voice voice;
+    voice.begin (start);
+    voice.render (result.getWritePointer (0), result.getWritePointer (1), length);
+
+    if (withGrain)
+    {
+        float phase = 0.0f, heldL = 0.0f, heldR = 0.0f;
+        processGrain (result, grain->get() / 100.0f, source->sampleRate, phase, heldL, heldR);
+    }
+
+    return true;
+}
+
+bool SiampleProcessor::renderSequenceAudio (juce::AudioBuffer<float>& result)
+{
+    const SampleData::Ptr source = sample;
+    const int count = sequenceLength;
+
+    if (source == nullptr || count == 0)
+        return false;
+
+    if (syncEnabled)
+        worker->waitUntilIdle (10000);
+
+    std::array<juce::AudioBuffer<float>, maxSlices> parts;
+    std::vector<int> offsets;
+    double position = 0.0;
+
+    for (int i = 0; i < count; ++i)
+    {
+        const int slice = sequence[(size_t) i];
+        offsets.push_back ((int) std::llround (position));
+        position += sliceSourceDuration (slice);
+
+        if (slice >= 0 && slice < numSlices && parts[(size_t) slice].getNumSamples() == 0)
+            renderSliceAudio (slice, parts[(size_t) slice], false);   // le grain est appliqué sur le tout, comme à l'écoute
+    }
+
+    const int total = juce::jmax (1, (int) std::llround (position));
+    result.setSize (2, total);
+    result.clear();
+
+    for (int i = 0; i < count; ++i)
+    {
+        const int slice = sequence[(size_t) i];
+
+        if (slice < 0 || slice >= numSlices)
+            continue;
+
+        const auto& part = parts[(size_t) slice];
+        const int offset = offsets[(size_t) i];
+
+        // Chaque tranche laisse la place à la suivante, comme à l'écoute
+        const int next = i + 1 < count ? offsets[(size_t) i + 1] : total;
+        const int length = juce::jmin (part.getNumSamples(), next - offset, total - offset);
+
+        if (length <= 0)
+            continue;
+
+        const int fade = juce::jmin (32, length);
+
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            result.addFrom (ch, offset, part, ch, 0, length);
+
+            if (length < part.getNumSamples())
+                result.applyGainRamp (ch, offset + length - fade, fade, 1.0f, 0.0f);
+        }
+    }
+
+    float phase = 0.0f, heldL = 0.0f, heldR = 0.0f;
+    processGrain (result, grain->get() / 100.0f, source->sampleRate, phase, heldL, heldR);
+    return true;
+}
+
+juce::File SiampleProcessor::writeTempWav (const juce::AudioBuffer<float>& buffer, const juce::String& suffix)
+{
+    if (sample == nullptr || buffer.getNumSamples() == 0)
+        return {};
+
+    const auto name = "Siample - " + sample->file.getFileNameWithoutExtension() + " - " + suffix + ".wav";
+    auto file = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                    .getChildFile (juce::File::createLegalFileName (name));
+
+    file.deleteFile();
+
+    juce::WavAudioFormat wav;
+    std::unique_ptr<juce::OutputStream> stream (file.createOutputStream());
+
+    if (stream == nullptr)
+        return {};
+
+    auto writer = wav.createWriterFor (stream, juce::AudioFormatWriterOptions().withSampleRate (sample->sampleRate)
+                                                                               .withNumChannels (buffer.getNumChannels())
+                                                                               .withBitsPerSample (24));
+
+    if (writer == nullptr || ! writer->writeFromAudioSampleBuffer (buffer, 0, buffer.getNumSamples()))
+        return {};
+
+    writer.reset();   // termine l'écriture du fichier
+    return file;
+}
+
+juce::File SiampleProcessor::createSliceAudioFile (int sliceIndex)
+{
+    juce::AudioBuffer<float> audio;
+
+    if (! renderSliceAudio (sliceIndex, audio))
+        return {};
+
+    return writeTempWav (audio, "tranche " + juce::String (sliceIndex + 1));
+}
+
+juce::File SiampleProcessor::createSequenceAudioFile()
+{
+    juce::AudioBuffer<float> audio;
+
+    if (! renderSequenceAudio (audio))
+        return {};
+
+    return writeTempWav (audio, "piste");
+}
+
+juce::File SiampleProcessor::createSequenceMidiFile()
+{
+    if (sample == nullptr || sequenceLength == 0)
+        return {};
+
+    // Les notes sont placées pour le tempo du projet : chaque tranche laisse la place à la suivante
+    const int ticksPerBeat = 960;
+    const double ticksPerSample = hostBpm.load() / 60.0 / sample->sampleRate * (double) ticksPerBeat;
+
+    juce::MidiMessageSequence notes;
+    double position = 0.0;
+
+    for (int i = 0; i < sequenceLength; ++i)
+    {
+        const int slice = sequence[(size_t) i];
+        const double on = std::round (position * ticksPerSample);
+        position += sliceSourceDuration (slice);
+        const double off = juce::jmax (on + 1.0, std::round (position * ticksPerSample) - 1.0);
+        const int note = juce::jlimit (0, 127, baseNote + slice);
+
+        notes.addEvent (juce::MidiMessage::noteOn (1, note, (juce::uint8) 100), on);
+        notes.addEvent (juce::MidiMessage::noteOff (1, note), off);
+    }
+
+    notes.sort();
+    notes.updateMatchedPairs();
+
+    juce::MidiFile midi;
+    midi.setTicksPerQuarterNote (ticksPerBeat);
+    midi.addTrack (notes);
+
+    const auto name = "Siample - " + sample->file.getFileNameWithoutExtension() + " - piste.mid";
     auto file = juce::File::getSpecialLocation (juce::File::tempDirectory)
                     .getChildFile (juce::File::createLegalFileName (name));
 
@@ -1079,6 +1469,10 @@ void SiampleProcessor::handleEvent (const Event& event)
             startVoice (patternSlices[(size_t) juce::jlimit (0, maxSlices - 1, event.value)], patternKey, 0.9f, 0.0);
             break;
 
+        case sequenceEvent:
+            startVoice (event.value, sequenceKey, 1.0f, 0.0);
+            break;
+
         default:
             break;
     }
@@ -1099,32 +1493,7 @@ void SiampleProcessor::renderVoices (juce::AudioBuffer<float>& buffer, int start
 
 void SiampleProcessor::applyGrain (juce::AudioBuffer<float>& buffer)
 {
-    const float amount = grain->get() / 100.0f;
-
-    if (amount < 0.005f || buffer.getNumChannels() == 0)
-        return;
-
-    // Grain des vieux samplers : fréquence d'échantillonnage réduite + moins de bits
-    const float hold   = (1.0f + amount * amount * 9.0f) * (float) (hostRate / 44100.0);
-    const float levels = std::pow (2.0f, 15.0f - 8.0f * amount);
-
-    float* left  = buffer.getWritePointer (0);
-    float* right = buffer.getNumChannels() > 1 ? buffer.getWritePointer (1) : left;
-
-    for (int i = 0; i < buffer.getNumSamples(); ++i)
-    {
-        grainPhase += 1.0f;
-
-        if (grainPhase >= hold)
-        {
-            grainPhase -= hold;
-            grainHeldL = std::round (left[i] * levels) / levels;
-            grainHeldR = std::round (right[i] * levels) / levels;
-        }
-
-        left[i]  = grainHeldL;
-        right[i] = grainHeldR;
-    }
+    processGrain (buffer, grain->get() / 100.0f, hostRate, grainPhase, grainHeldL, grainHeldR);
 }
 
 void SiampleProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
@@ -1228,6 +1597,49 @@ void SiampleProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
 
         patternWasPlaying = playing;
 
+        // Lecture de la piste : les tranches s'enchaînent bout à bout, puis on repart du début
+        const bool sequencing = sequencePlaying.load() && sample != nullptr && sequenceLength > 0;
+
+        if (sequencing)
+        {
+            if (! sequenceWasPlaying)
+            {
+                sequenceIndex = 0;
+                sequenceCountdown = 0.0;
+            }
+
+            const double toHost = hostRate / sample->sampleRate;
+
+            for (int guard = 0; sequenceCountdown < (double) numSamples && guard < 128; ++guard)
+            {
+                if (sequenceIndex >= sequenceLength)
+                    sequenceIndex = 0;
+
+                const int slice = sequence[(size_t) sequenceIndex];
+
+                if (slice >= 0 && slice < numSlices)
+                {
+                    addEvent ((int) sequenceCountdown, sequenceEvent, slice, 1.0f);
+                    sequencePlayingStep.store (sequenceIndex, std::memory_order_relaxed);
+                }
+
+                sequenceCountdown += juce::jmax (32.0, sliceSourceDuration (slice) * toHost);
+                ++sequenceIndex;
+            }
+
+            sequenceCountdown -= (double) numSamples;
+        }
+        else if (sequenceWasPlaying)
+        {
+            for (auto& v : voices)
+                if (v.active && v.key == sequenceKey)
+                    v.kill (hostRate);
+
+            sequencePlayingStep.store (-1, std::memory_order_relaxed);
+        }
+
+        sequenceWasPlaying = sequencing;
+
         // Les événements sont joués dans l'ordre du temps (à temps égal, dans l'ordre d'arrivée)
         for (int i = 1; i < numEvents; ++i)
         {
@@ -1317,6 +1729,15 @@ void SiampleProcessor::getStateInformation (juce::MemoryBlock& destData)
             order.add (juce::String (patternSlices[(size_t) i]));
 
         state.setProperty ("pattern", order.joinIntoString (","), nullptr);
+    }
+
+    if (sequenceLength > 0)
+    {
+        juce::StringArray steps;
+        for (int i = 0; i < sequenceLength; ++i)
+            steps.add (juce::String (sequence[(size_t) i]));
+
+        state.setProperty ("sequence", steps.joinIntoString (","), nullptr);
     }
 
     for (int i = 0; i < numSlices; ++i)
@@ -1465,6 +1886,24 @@ void SiampleProcessor::setStateInformation (const void* data, int sizeInBytes)
                 patternSlices[(size_t) i] = juce::jlimit (0, numSlices - 1, order[i].getIntValue());
 
             patternFlipped = true;
+        }
+
+        // Piste
+        juce::StringArray steps;
+        steps.addTokens (state.getProperty ("sequence").toString(), ",", "");
+        steps.removeEmptyStrings();
+
+        {
+            const juce::SpinLock::ScopedLockType lock (audioLock);
+            sequenceLength = 0;
+
+            for (const auto& step : steps)
+            {
+                const int slice = step.getIntValue();
+
+                if (slice >= 0 && slice < numSlices && sequenceLength < maxSequenceSteps)
+                    sequence[(size_t) sequenceLength++] = slice;
+            }
         }
 
         scheduleRender();

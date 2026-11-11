@@ -114,6 +114,7 @@ public:
     void mouseDown (const juce::MouseEvent& e) override
     {
         pressed = -1;
+        dragStarted = false;
 
         for (int pad = 0; pad < 16; ++pad)
         {
@@ -134,6 +135,20 @@ public:
                 }
                 break;
             }
+        }
+    }
+
+    /** Glisser un pad : on l'emporte vers la piste. */
+    void mouseDrag (const juce::MouseEvent& e) override
+    {
+        if (pressed < 0 || dragStarted || e.getDistanceFromDragStart() < 8)
+            return;
+
+        if (auto* container = juce::DragAndDropContainer::findParentDragContainerFor (this))
+        {
+            dragStarted = true;
+            proc.audition (pressed, false);
+            container->startDragging ("slice:" + juce::String (pressed), this, makeSliceDragImage (pressed));
         }
     }
 
@@ -161,6 +176,7 @@ private:
     std::array<juce::TextButton, 4> bankButtons;
     int bank = 0;
     int pressed = -1;
+    bool dragStarted = false;
     juce::uint64 activeMask = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PadGrid)

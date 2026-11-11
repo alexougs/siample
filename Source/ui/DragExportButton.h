@@ -1,22 +1,34 @@
 #pragma once
 
-#include "../PluginProcessor.h"
+#include <juce_gui_basics/juce_gui_basics.h>
+#include <functional>
 #include "Theme.h"
 
 namespace siample
 {
 
-/** Zone à attraper à la souris : on la glisse dans le DAW pour y déposer la boucle en notes MIDI. */
-class MidiDragButton final : public juce::Component,
-                             public juce::SettableTooltipClient
+/** Zone à attraper à la souris : on la glisse dans le DAW pour y déposer un fichier (audio ou MIDI)
+    fabriqué au moment où l'on commence à glisser. */
+class DragExportButton final : public juce::Component,
+                               public juce::SettableTooltipClient
 {
 public:
-    explicit MidiDragButton (SiampleProcessor& p) : proc (p)
+    /** Fabrique le fichier à déposer. Un fichier inexistant annule le glisser. */
+    std::function<juce::File()> createFile;
+
+    DragExportButton (const juce::String& label, const juce::String& tooltip) : text (label)
     {
         setMouseCursor (juce::MouseCursor::DraggingHandCursor);
-        setTooltip (fr ("Attrape ce bouton et glisse-le dans le piano roll ou la playlist : "
-                        "la boucle y est déposée en notes MIDI, une note par tranche. "
-                        "Un simple clic montre le fichier MIDI dans son dossier."));
+        setTooltip (tooltip + fr (" Un simple clic montre le fichier dans son dossier."));
+    }
+
+    void setText (const juce::String& newText)
+    {
+        if (text != newText)
+        {
+            text = newText;
+            repaint();
+        }
     }
 
     void paint (juce::Graphics& g) override
@@ -38,7 +50,7 @@ public:
 
         g.setColour (theme::text.withMultipliedAlpha (alpha));
         g.setFont (theme::font (13.5f));
-        g.drawText (fr ("Glisser le MIDI vers le DAW"), getLocalBounds(), juce::Justification::centred, false);
+        g.drawText (text, getLocalBounds().reduced (4, 0), juce::Justification::centred, true);
     }
 
     void mouseEnter (const juce::MouseEvent&) override   { hovering = true;  repaint(); }
@@ -54,7 +66,7 @@ public:
         // n'accepte pas le dépôt direct depuis la fenêtre du plugin.
         if (! dragged && isEnabled() && ! e.mods.isPopupMenu() && getLocalBounds().contains (e.getPosition()))
         {
-            const auto file = proc.createPatternMidiFile();
+            const auto file = makeFile();
 
             if (file.existsAsFile())
                 file.revealToUser();
@@ -68,7 +80,7 @@ public:
 
         dragged = true;
 
-        const auto file = proc.createPatternMidiFile();
+        const auto file = makeFile();
 
         if (file.existsAsFile())
         {
@@ -79,12 +91,14 @@ public:
     }
 
 private:
-    SiampleProcessor& proc;
+    juce::File makeFile() const   { return createFile != nullptr ? createFile() : juce::File(); }
+
+    juce::String text;
     bool hovering = false;
     bool dragging = false;
     bool dragged = false;
 
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MidiDragButton)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (DragExportButton)
 };
 
 } // namespace siample

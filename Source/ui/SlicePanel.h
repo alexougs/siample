@@ -2,6 +2,7 @@
 
 #include "../PluginProcessor.h"
 #include "Theme.h"
+#include "DragExportButton.h"
 
 namespace siample
 {
@@ -131,6 +132,9 @@ public:
         };
         addAndMakeVisible (resetButton);
 
+        audioDrag.createFile = [this] { return proc.createSliceAudioFile (proc.getSelectedSlice()); };
+        addAndMakeVisible (audioDrag);
+
         refresh();
     }
 
@@ -176,7 +180,7 @@ public:
         for (auto* k : getKnobs())
             k->setEnabled (enabled);
 
-        for (auto* c : std::initializer_list<juce::Component*> { &oneShotButton, &gateButton, &loopButton, &reverseButton, &chokeBox, &applyAllButton, &resetButton })
+        for (auto* c : std::initializer_list<juce::Component*> { &oneShotButton, &gateButton, &loopButton, &reverseButton, &chokeBox, &applyAllButton, &resetButton, &audioDrag })
             c->setEnabled (enabled);
 
         repaint();
@@ -194,7 +198,7 @@ public:
         g.drawText (title, header, juce::Justification::centredLeft, false);
 
         header.removeFromLeft (juce::roundToInt (juce::GlyphArrangement::getStringWidth (titleFont, title)) + 14);
-        header.setRight (applyAllButton.getX() - 8);
+        header.setRight (audioDrag.getX() - 8);
         g.setColour (theme::textDim);
         g.setFont (theme::font (13.0f));
         g.drawText (subtitle, header, juce::Justification::centredLeft, true);
@@ -208,6 +212,8 @@ public:
         resetButton.setBounds (header.removeFromRight (104));
         header.removeFromRight (6);
         applyAllButton.setBounds (header.removeFromRight (140));
+        header.removeFromRight (6);
+        audioDrag.setBounds (header.removeFromRight (116));
 
         area.removeFromBottom (12);
         auto options = area.removeFromBottom (28);
@@ -293,6 +299,9 @@ private:
     juce::TextButton oneShotButton, gateButton, loopButton, reverseButton, applyAllButton, resetButton;
     juce::Label chokeLabel;
     juce::ComboBox chokeBox;
+    DragExportButton audioDrag { fr ("Glisser l'audio"),
+                                 fr ("Attrape ce bouton et glisse-le dans la playlist du DAW : la tranche y est déposée "
+                                     "en audio, avec tous ses réglages (pitch, filtre, enveloppe, grain, Sync).") };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SlicePanel)
 };

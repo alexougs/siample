@@ -4,7 +4,7 @@ Sampler-découpeur pour FL Studio (Mac et Windows) et Logic Pro : tu glisses un 
 
 Formats produits : VST3 (FL Studio Mac et Windows), Audio Unit (Logic Pro), et une application autonome pour tester sans DAW.
 
-## Ce que fait la version 0.3
+## Ce que fait la version 0.4
 
 **Découpe**
 - Chargement par glisser-déposer ou par le bouton « Charger un sample » (WAV, AIFF, FLAC, OGG, MP3, 15 minutes maximum).
@@ -25,7 +25,16 @@ Formats produits : VST3 (FL Studio Mac et Windows), Audio Unit (Logic Pro), et u
 **Boucle**
 - **Écouter** : joue la boucle en continu.
 - **Flip** : réarrange les tranches au hasard en gardant le rythme d'origine. Chaque clic donne une nouvelle idée.
-- **Glisser le MIDI vers le DAW** : dépose la boucle (d'origine ou flippée) en notes dans le piano roll.
+- **Glisser le MIDI** : dépose la boucle (d'origine ou flippée) en notes dans le piano roll.
+
+**Piste** (assembler ses tranches)
+- Glisse des pads sur la piste pour les enchaîner dans l'ordre que tu veux, par exemple 1, 1, 3. Le bouton **+ Tranche** ajoute la tranche sélectionnée.
+- Glisser un bloc le déplace, un clic l'écoute, un clic droit le retire. La largeur d'un bloc suit la durée de la tranche.
+- **Écouter** joue la piste en continu.
+- **Glisser l'audio** dépose la piste en WAV dans la playlist du DAW, telle que tu l'entends. **Glisser le MIDI** la dépose en notes.
+
+**Export audio d'une tranche**
+- Dans le panneau de la tranche, **Glisser l'audio** dépose la tranche sélectionnée en WAV dans le DAW, avec tous ses réglages (pitch, filtre, enveloppe, grain, Sync).
 
 La découpe et tous les réglages sont enregistrés dans le projet du DAW.
 
@@ -61,7 +70,7 @@ Dès que tu modifies un point à la main, Siample passe en mode « Manuel » pou
 1. Charge le sample et trace la zone qui contient la boucle.
 2. Vérifie le tempo affiché. S'il est deux fois trop lent ou trop rapide, utilise ×2 ou ÷2.
 3. Active **Sync** : la boucle suit maintenant le tempo du projet.
-4. Glisse le bouton « Glisser le MIDI vers le DAW » dans le piano roll de la piste Siample. Les notes rejouent la boucle ; déplace-les pour la réarranger.
+4. Glisse le bouton « Glisser le MIDI » dans le piano roll de la piste Siample. Les notes rejouent la boucle ; déplace-les pour la réarranger.
 5. Pour des idées, clique sur **Flip** puis **Écouter**, et glisse le MIDI quand un réarrangement te plaît. Active **Mono** pour que les tranches ne se chevauchent pas.
 
 Si le DAW refuse le dépôt direct, un simple clic sur le bouton montre le fichier MIDI dans son dossier : glisse-le de là.
@@ -76,6 +85,8 @@ En mode Clavier, la note MIDI 60 (C5 dans FL Studio, C3 dans Logic Pro) joue la 
 
 - Siample enregistre **le chemin** du sample, pas le son lui-même. Si tu déplaces ou supprimes le fichier, le plugin affichera « Fichier introuvable » à la réouverture du projet ; ta découpe est conservée et revient dès que tu remets le fichier à sa place. Range donc tes samples dans un dossier stable avant de les charger.
 - Sans Sync, le pitch change aussi la durée de la tranche, comme sur une MPC.
+- Les boutons à bordure en pointillés se glissent vers le DAW. Si le DAW refuse le dépôt direct depuis la fenêtre du plugin, un simple clic sur le bouton montre le fichier dans son dossier : glisse-le de là.
+- Sur la piste, chaque tranche laisse la place à la suivante. Les fichiers exportés sont écrits dans le dossier temporaire du système : range dans ton projet ceux que tu veux garder (FL Studio et Logic copient en général l'audio déposé, vérifie selon tes réglages).
 - En mode Boucle, la durée de la répétition est celle de la tranche : règle ses points de début et de fin pour que la boucle tombe juste. Avec Sync, une tranche qui dure un nombre rond de temps reste calée sur le projet.
 - Quand Sync est activé, Siample recalcule les tranches en arrière-plan à chaque changement de tempo, de pitch ou de découpe. Pendant ce calcul (« calcul en cours… »), les tranches pas encore prêtes se jouent à leur vitesse d'origine. À l'export, Siample attend la fin du calcul.
 - La détection du tempo peut se tromper d'un facteur deux sur les tempos très lents ou très rapides : c'est le rôle des boutons ÷2 et ×2.
@@ -107,7 +118,7 @@ cmake --build build --target SiampleTests
 | `Source/TransientDetector.h` | Détection des attaques et du tempo |
 | `Source/Stretcher.*` | Étirement temporel et transposition (via Signalsmith Stretch) |
 | `Source/PluginEditor.*` | Fenêtre du plugin |
-| `Source/ui/` | Forme d'onde, pads, panneau de réglages, glisser MIDI, thème |
+| `Source/ui/` | Forme d'onde, pads, panneau de réglages, piste, boutons à glisser (audio et MIDI), thème |
 | `tests/SiampleTests.cpp` | Tests automatiques |
 | `.github/workflows/build.yml` | Compilation automatique Mac et Windows |
 

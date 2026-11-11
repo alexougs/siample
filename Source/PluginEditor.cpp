@@ -39,7 +39,17 @@ void SiampleEditor::styleBarLabel (juce::Label& label, const juce::String& text,
 
 //==============================================================================
 SiampleEditor::SiampleEditor (SiampleProcessor& p)
-    : AudioProcessorEditor (&p), proc (p), waveform (p), midiDrag (p), pads (p), slicePanel (p)
+    : AudioProcessorEditor (&p), proc (p), waveform (p),
+      midiDrag (fr ("Glisser le MIDI"),
+                fr ("Attrape ce bouton et glisse-le dans le piano roll ou la playlist : "
+                    "la boucle y est déposée en notes MIDI, une note par tranche.")),
+      sequenceAudioDrag (fr ("Glisser l'audio"),
+                         fr ("Attrape ce bouton et glisse-le dans la playlist du DAW : "
+                             "la piste y est déposée en audio, telle que tu l'entends.")),
+      sequenceMidiDrag (fr ("Glisser le MIDI"),
+                        fr ("Attrape ce bouton et glisse-le dans le piano roll : "
+                            "la piste y est déposée en notes MIDI, une note par tranche.")),
+      sequenceLane (p), pads (p), slicePanel (p)
 {
     setLookAndFeel (&lookAndFeel);
 
@@ -235,10 +245,40 @@ SiampleEditor::SiampleEditor (SiampleProcessor& p)
     originalButton.onClick = [this] { proc.resetPattern(); refresh(); };
     addAndMakeVisible (originalButton);
 
+    midiDrag.createFile = [this] { return proc.createPatternMidiFile(); };
     addAndMakeVisible (midiDrag);
 
     styleBarLabel (loopInfoLabel, {}, false);
     addAndMakeVisible (loopInfoLabel);
+
+    // --- Piste
+    styleBarLabel (sequenceLabel, "Piste", true);
+    addAndMakeVisible (sequenceLabel);
+
+    styleToggle (sequenceListenButton, fr ("Écouter"), fr ("Joue la piste en continu : les tranches s'enchaînent dans l'ordre affiché"));
+    sequenceListenButton.onClick = [this] { proc.setSequencePlaying (sequenceListenButton.getToggleState()); refresh(); };
+    addAndMakeVisible (sequenceListenButton);
+
+    sequenceAddButton.setTooltip (fr ("Ajoute la tranche sélectionnée à la fin de la piste. Tu peux aussi glisser un pad sur la piste."));
+    sequenceAddButton.onClick = [this] { proc.insertSequenceStep (proc.getSelectedSlice()); refresh(); };
+    addAndMakeVisible (sequenceAddButton);
+
+    sequenceClearButton.setButtonText ("Vider");
+    sequenceClearButton.setTooltip (fr ("Retire toutes les tranches de la piste"));
+    sequenceClearButton.onClick = [this] { proc.clearSequence(); refresh(); };
+    addAndMakeVisible (sequenceClearButton);
+
+    sequenceAudioDrag.createFile = [this] { return proc.createSequenceAudioFile(); };
+    sequenceMidiDrag.createFile  = [this] { return proc.createSequenceMidiFile(); };
+    addAndMakeVisible (sequenceAudioDrag);
+    addAndMakeVisible (sequenceMidiDrag);
+
+    styleBarLabel (sequenceInfoLabel, {}, false);
+    addAndMakeVisible (sequenceInfoLabel);
+
+    sequenceLane.onEdit   = [this] { refresh(); };
+    sequenceLane.onSelect = [this] { selectionChanged(); };
+    addAndMakeVisible (sequenceLane);
 
     // --- Bas
     pads.onSelect = [this] { selectionChanged(); };
@@ -250,8 +290,8 @@ SiampleEditor::SiampleEditor (SiampleProcessor& p)
     proc.addChangeListener (this);
 
     setResizable (true, true);
-    setResizeLimits (900, 680, 1800, 1300);
-    setSize (1020, 770);
+    setResizeLimits (900, 740, 1800, 1400);
+    setSize (1020, 860);
 
     // les composants créés avant l'application du thème reprennent ses couleurs
     sendLookAndFeelChange();
@@ -339,15 +379,33 @@ void SiampleEditor::resized()
     area.removeFromBottom (14);
 
     // Bas : pads à gauche, réglages à droite
-    const int bottomHeight = juce::jlimit (270, 350, area.getHeight() * 46 / 100);
+    const int bottomHeight = juce::jlimit (270, 350, area.getHeight() * 42 / 100);
     auto bottom = area.removeFromBottom (bottomHeight);
     const int padsWidth = juce::jmin (bottom.getWidth() * 40 / 100, (bottomHeight - 32) * 5 / 4);
     pads.setBounds (bottom.removeFromLeft (padsWidth));
     bottom.removeFromLeft (14);
     slicePanel.setBounds (bottom);
 
-    // Barre de boucle
+    // Piste
     area.removeFromBottom (12);
+    sequenceLane.setBounds (area.removeFromBottom (52));
+    area.removeFromBottom (6);
+    bar = area.removeFromBottom (30);
+    sequenceLabel.setBounds (bar.removeFromLeft (70));
+    sequenceListenButton.setBounds (bar.removeFromLeft (84));
+    bar.removeFromLeft (8);
+    sequenceAddButton.setBounds (bar.removeFromLeft (112));
+    bar.removeFromLeft (4);
+    sequenceClearButton.setBounds (bar.removeFromLeft (60));
+    bar.removeFromLeft (12);
+    sequenceAudioDrag.setBounds (bar.removeFromLeft (124));
+    bar.removeFromLeft (6);
+    sequenceMidiDrag.setBounds (bar.removeFromLeft (124));
+    bar.removeFromLeft (10);
+    sequenceInfoLabel.setBounds (bar);
+
+    // Barre de boucle
+    area.removeFromBottom (10);
     bar = area.removeFromBottom (30);
     loopLabel.setBounds (bar.removeFromLeft (70));
     listenButton.setBounds (bar.removeFromLeft (84));
@@ -356,7 +414,7 @@ void SiampleEditor::resized()
     bar.removeFromLeft (4);
     originalButton.setBounds (bar.removeFromLeft (80));
     bar.removeFromLeft (12);
-    midiDrag.setBounds (bar.removeFromLeft (210));
+    midiDrag.setBounds (bar.removeFromLeft (124));
     bar.removeFromLeft (10);
     loopInfoLabel.setBounds (bar);
 
@@ -457,7 +515,9 @@ void SiampleEditor::timerCallback()
     if (std::abs (host - shownHostBpm) > 0.005 || rendering != shownRendering)
         updateHostLabel();
 
-    if (proc.isPatternPlaying() != shownPlaying)
+    sequenceLane.setPlayingStep (proc.isSequencePlaying() ? proc.getSequencePlayingStep() : -1);
+
+    if (proc.isPatternPlaying() != shownPlaying || proc.isSequencePlaying() != shownSequencePlaying)
         refresh();
 }
 
@@ -466,6 +526,9 @@ void SiampleEditor::selectionChanged()
     pads.showSlice (proc.getSelectedSlice());
     slicePanel.refresh();
     waveform.repaint();
+
+    if (proc.hasSample() && proc.getNumSlices() > 0)
+        sequenceAddButton.setButtonText ("+ Tranche " + juce::String (proc.getSelectedSlice() + 1));
 }
 
 void SiampleEditor::updateHostLabel()
@@ -562,6 +625,33 @@ void SiampleEditor::refresh()
                                juce::dontSendNotification);
     else
         loopInfoLabel.setText (fr ("Ordre d'origine"), juce::dontSendNotification);
+
+    // Piste
+    const int steps = proc.getSequenceLength();
+    shownSequencePlaying = proc.isSequencePlaying();
+    sequenceListenButton.setToggleState (shownSequencePlaying, juce::dontSendNotification);
+    sequenceListenButton.setButtonText (shownSequencePlaying ? juce::String ("Stop") : fr ("Écouter"));
+    sequenceAddButton.setButtonText (hasSample && count > 0 ? "+ Tranche " + juce::String (proc.getSelectedSlice() + 1)
+                                                            : juce::String ("+ Tranche"));
+    sequenceAddButton.setEnabled (hasSample && count > 0 && steps < maxSequenceSteps);
+
+    for (auto* c : std::initializer_list<juce::Component*> { &sequenceListenButton, &sequenceClearButton,
+                                                              &sequenceAudioDrag, &sequenceMidiDrag })
+        c->setEnabled (hasSample && steps > 0);
+
+    if (! hasSample || steps == 0)
+    {
+        sequenceInfoLabel.setText ({}, juce::dontSendNotification);
+    }
+    else
+    {
+        const double seconds = proc.getSequenceSeconds();
+        sequenceInfoLabel.setText (juce::String (steps) + (steps > 1 ? " tranches" : " tranche") + fr ("  ·  ")
+                                       + juce::String (seconds, seconds < 10.0 ? 2 : 1) + " s",
+                                   juce::dontSendNotification);
+    }
+
+    sequenceLane.repaint();
 
     for (auto* c : std::initializer_list<juce::Component*> { &transientsButton, &gridButton, &manualButton, &sensitivitySlider,
                                                               &divisionsBox, &bpmLabel, &halfButton, &doubleButton, &syncButton,
