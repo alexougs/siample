@@ -16,6 +16,10 @@ struct VoiceStart
     const void* owner = nullptr;                      // la tranche étirée utilisée, sinon nullptr
     int start = 0, end = 0;                           // passage à lire dans `source`
     int originalStart = 0, originalEnd = 0;           // le même passage dans le sample d'origine
+    int deck = 0;                                     // le sample auquel appartient la tranche
+    int lane = -1;                                    // >= 0 : voix du montage, une seule à la fois par ligne
+    int lead = 0;                                     // échantillons disponibles avant `start` dans `source`
+    double life = -1.0;                               // durée en échantillons de sortie avant relâchement, < 0 : libre
     double rate = 1.0;                                // échantillons source par échantillon de sortie
     float velocity = 1.0f;
     double hostRate = 44100.0;
@@ -33,7 +37,12 @@ struct Voice
 
     int slice = -1;
     int key   = -1;
+    int deck  = 0;
+    int lane  = -1;
     int choke = 0;
+    double life = -1.0;
+    double xfade = 0.0;       // fondu enchaîné au point de bouclage, en échantillons de la source
+    float driveGain = 0.0f, driveComp = 1.0f;
     int start = 0, end = 0;
     int originalStart = 0, originalEnd = 0;
     juce::uint64 age = 0;
@@ -63,6 +72,9 @@ struct Voice
         killing = false;
         slice   = s.slice;
         key     = s.key;
+        deck    = s.deck;
+        lane    = s.lane;
+        life    = s.life;
         choke   = p.choke;
         looping = p.loop;
         oneShot = p.oneShot && ! p.loop;   // une boucle s'arrête au relâchement, comme en mode gate
@@ -86,7 +98,19 @@ struct Voice
         rampIn  = 0.0f;
         rampInc = (float) (1.0 / juce::jmax (1.0, s.hostRate * 0.0005));
 
-        setFilter (p.filter, s.hostRate);
+        setFilter (p.filter, p.resonance, s.hostRate);
+
+        const float drive = juce::jlimit (0.0f, 1.0f, p.drive);
+        driveGain = drive > 0.005f ? 1.0f + 11.0f * drive * drive : 0.0f;
+        driveComp = drive > 0.005f ? 1.0f / std::pow (driveGain, 0.55f) : 1.0f;
+
+        // Fondu enchaîné de boucle : il se nourrit de l'audio qui précède la tranche
+        xfade = 0.0;
+        if (looping && ! reverse && p.loopFade > 0.5f)
+            xfade = juce::jmin ((double) p.loopFade * 0.001 * s.hostRate * rate,
+                                (double) s.lead, (double) (end - start) * 0.5);
+        if (xfade < 8.0)
+            xfade = 0.0;
 
         adsr.setSampleRate (s.hostRate);
         adsr.setParameters ({ p.attack, p.decay, p.sustain, p.release });
@@ -111,6 +135,17 @@ struct Voice
             adsr.noteOff();
     }
 
+    /** Relâche la voix même si la tranche est en one-shot (fin d'un bloc du montage). */
+    void release()
+    {
+        if (active)
+        {
+            oneShot = false;
+            life = -1.0;
+            adsr.noteOff();
+        }
+    }
+
     /** Position de lecture ramenée au sample d'origine (pour la tête de lecture). */
     int originalPosition() const
     {
@@ -128,6 +163,14 @@ struct Voice
 
         for (int i = 0; i < numSamples; ++i)
         {
+            if (life >= 0.0)
+            {
+                life -= 1.0;
+
+                if (life < 0.0)
+                    release();
+            }
+
             double remaining = reverse ? (pos - (double) start + 1.0) : ((double) end - pos);
 
             if (remaining <= 0.0)
@@ -143,7 +186,9 @@ struct Voice
                 const double length = (double) (end - start);
                 pos += reverse ? length : -length;
                 pos = juce::jlimit ((double) start, (double) (end - 1), pos);
-                rampIn = 0.0f;
+
+                if (xfade <= 0.0)
+                    rampIn = 0.0f;
                 remaining = reverse ? (pos - (double) start + 1.0) : ((double) end - pos);
             }
 
@@ -157,7 +202,7 @@ struct Voice
 
             // Fondu de sortie quand on arrive au bord de la tranche
             const float outLeft = (float) (remaining / rate);
-            if (outLeft < edgeFade)
+            if (outLeft < edgeFade && xfade <= 0.0)
                 g *= outLeft / edgeFade;
 
             if (rampIn < 1.0f)
@@ -188,10 +233,30 @@ struct Voice
             float left  = hermite (in0[i0], in0[i1], in0[i2], in0[i3], f);
             float right = hermite (in1[i0], in1[i1], in1[i2], in1[i3], f);
 
+            // Fondu enchaîné : la fin de la tranche se mêle à ce qui précède son début,
+            // qui s'enchaîne naturellement sur le début au moment de reboucler.
+            if (xfade > 0.0 && remaining < xfade)
+            {
+                const float t  = (float) (1.0 - remaining / xfade);
+                const int   j1 = juce::jlimit (0, last, i1 - (end - start));
+                const int   j0 = juce::jmax (0, j1 - 1);
+                const int   j2 = juce::jmin (last, j1 + 1);
+                const int   j3 = juce::jmin (last, j1 + 2);
+
+                left  += t * (hermite (in0[j0], in0[j1], in0[j2], in0[j3], f) - left);
+                right += t * (hermite (in1[j0], in1[j1], in1[j2], in1[j3], f) - right);
+            }
+
             if (filterType != 0)
             {
                 left  = filterSample (left, 0);
                 right = filterSample (right, 1);
+            }
+
+            if (driveGain > 0.0f)
+            {
+                left  = std::tanh (left * driveGain) * driveComp;
+                right = std::tanh (right * driveGain) * driveComp;
             }
 
             outL[i] += g * gainL * left;
@@ -202,7 +267,7 @@ struct Voice
     }
 
 private:
-    void setFilter (float amount, double hostRate)
+    void setFilter (float amount, float resonance, double hostRate)
     {
         ic1[0] = ic1[1] = ic2[0] = ic2[1] = 0.0f;
         amount = juce::jlimit (-1.0f, 1.0f, amount);
@@ -222,7 +287,7 @@ private:
         filterType = amount < 0.0f ? 1 : 2;
 
         const float g = (float) std::tan (juce::MathConstants<double>::pi * cutoff / hostRate);
-        fk  = 1.414f;
+        fk  = 1.414f * std::pow (0.085f, juce::jlimit (0.0f, 1.0f, resonance));   // Q de 0,7 à 8 environ
         fa1 = 1.0f / (1.0f + g * (g + fk));
         fa2 = g * fa1;
         fa3 = g * fa2;

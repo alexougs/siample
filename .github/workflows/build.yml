@@ -69,11 +69,24 @@ jobs:
           # ditto conserve les droits d'exécution et la structure des bundles
           cd dist && ditto -c -k --keepParent Siample-macOS ../Siample-macOS.zip
 
+      # Installeur Windows (Inno Setup). S'il échoue, l'archive contient quand même le plugin à copier à la main.
+      - name: Fabriquer l'installeur (Windows)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress }
+          $version = (Select-String -Path CMakeLists.txt -Pattern 'project\(Siample VERSION ([0-9.]+)').Matches[0].Groups[1].Value
+          & $iscc "/DAppVersion=$version" packaging\Windows\Siample.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Préparer l'archive (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist/Siample-Windows | Out-Null
+          if (Test-Path "dist/Installer Siample.exe") { Move-Item "dist/Installer Siample.exe" dist/Siample-Windows/ }
           Copy-Item -Recurse build/Siample_artefacts/Release/VST3/Siample.vst3 dist/Siample-Windows/
           Copy-Item build/Siample_artefacts/Release/Standalone/Siample.exe dist/Siample-Windows/
           Copy-Item packaging/Windows/LISEZMOI.txt dist/Siample-Windows/

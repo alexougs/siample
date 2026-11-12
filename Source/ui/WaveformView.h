@@ -96,15 +96,15 @@ public:
     void paint (juce::Graphics& g) override
     {
         const auto bounds = getLocalBounds().toFloat();
-        g.setColour (theme::panel);
-        g.fillRoundedRectangle (bounds, 6.0f);
+        g.setColour (theme::well);
+        g.fillRoundedRectangle (bounds, 8.0f);
 
         if (sample == nullptr)
         {
             g.setColour (dropHighlight ? theme::accent : theme::textDim);
-            g.setFont (theme::font (17.0f));
+            g.setFont (theme::font (16.0f));
             g.drawFittedText (emptyMessage.isNotEmpty() ? emptyMessage
-                                                         : fr ("Glisse un sample ici, ou clique sur « Charger un sample »"),
+                                                         : fr ("Glisse un sample ici, ou clique sur « Charger »"),
                               getLocalBounds().reduced (20), juce::Justification::centred, 3);
 
             if (dropHighlight)
@@ -139,10 +139,10 @@ public:
             juce::Colour fill = (i % 2 == 0) ? juce::Colours::white.withAlpha (0.035f) : juce::Colours::transparentBlack;
 
             if (i == selected)
-                fill = theme::accent.withAlpha (0.13f);
+                fill = sliceColour (i).withAlpha (0.13f);
 
             if (playing)
-                fill = theme::accent.withAlpha (i == selected ? 0.26f : 0.18f);
+                fill = sliceColour (i).withAlpha (i == selected ? 0.28f : 0.2f);
 
             g.setColour (fill);
             g.fillRect (juce::Rectangle<float> (x1, (float) wave.getY(), x2 - x1, (float) wave.getHeight()));
@@ -164,9 +164,9 @@ public:
             const bool inRegion = s0 >= (double) rs && s0 < (double) re;
             const bool inSelected = inRegion && s0 >= (double) selStart && s0 < (double) selEnd;
 
-            g.setColour (inSelected ? theme::accent
-                                    : inRegion ? theme::wave
-                                               : theme::wave.withAlpha (0.25f));
+            g.setColour (inSelected ? sliceColour (selected)
+                                    : inRegion ? theme::wave.withAlpha (0.8f)
+                                               : theme::wave.withAlpha (0.22f));
 
             const float top    = mid - juce::jlimit (-1.0f, 1.0f, hi) * half;
             const float bottom = mid - juce::jlimit (-1.0f, 1.0f, lo) * half;
@@ -184,12 +184,13 @@ public:
                 continue;
 
             const bool isSelected = i == selected;
-            g.setColour (isSelected ? theme::accent : theme::text.withAlpha (0.55f));
-            g.fillRect (x - 0.5f, (float) wave.getY(), isSelected ? 2.0f : 1.0f, (float) wave.getHeight());
+            g.setColour (sliceColour (i).withAlpha (isSelected ? 1.0f : 0.75f));
+            g.fillRect (x - 0.5f, (float) wave.getY(), isSelected ? 2.0f : 1.5f, (float) wave.getHeight());
 
-            const juce::Rectangle<float> tag (x, (float) wave.getY(), 22.0f, 14.0f);
-            g.fillRoundedRectangle (tag, 2.0f);
-            g.setColour (theme::background);
+            g.setColour (sliceColour (i));
+            const juce::Rectangle<float> tag (x, (float) wave.getY(), 22.0f, 15.0f);
+            g.fillRoundedRectangle (tag, 3.0f);
+            g.setColour (theme::onAccent);
             g.drawText (juce::String (i + 1), tag, juce::Justification::centred, false);
         }
 

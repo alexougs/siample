@@ -9,8 +9,17 @@ namespace
     // Les identifiants d'un menu doivent être positifs : on décale les valeurs musicales
     constexpr int musicalIdOffset = 100;
 
+    constexpr int minimumWidth = 1040;
+    constexpr int browserWidth = 232;
+
     int divisionsToId (int divisions)   { return divisions > 0 ? divisions : musicalIdOffset - divisions; }
     int idToDivisions (int id)          { return id > musicalIdOffset ? musicalIdOffset - id : id; }
+
+    juce::String keyName (int root, bool minor)
+    {
+        static const char* names[] = { "Do", "Do#", "R\xc3\xa9", "R\xc3\xa9#", "Mi", "Fa", "Fa#", "Sol", "Sol#", "La", "La#", "Si" };
+        return fr (names[((root % 12) + 12) % 12]) + (minor ? " min" : " maj");
+    }
 
     void styleRotary (juce::Slider& slider, juce::Component* popupParent, const juce::String& suffix, const juce::String& tooltip)
     {
@@ -27,40 +36,104 @@ namespace
         button.setTooltip (tooltip);
         button.setClickingTogglesState (true);
     }
+
+    void styleButton (juce::TextButton& button, const juce::String& text, const juce::String& tooltip)
+    {
+        button.setButtonText (text);
+        button.setTooltip (tooltip);
+    }
 }
 
-void SiampleEditor::styleBarLabel (juce::Label& label, const juce::String& text, bool strong)
+void SiampleEditor::styleCaption (juce::Label& label, const juce::String& text)
 {
-    label.setText (text, juce::dontSendNotification);
-    label.setFont (theme::font (strong ? 14.0f : 13.0f, strong));
-    label.setColour (juce::Label::textColourId, strong ? theme::text : theme::textDim);
+    label.setText (upper (text), juce::dontSendNotification);
+    label.setFont (theme::heading (11.5f).withExtraKerningFactor (0.08f));
+    label.setColour (juce::Label::textColourId, theme::textDim);
     label.setMinimumHorizontalScale (0.8f);
+    label.setBorderSize (juce::BorderSize<int> (0));
+}
+
+void SiampleEditor::styleValueBox (juce::Label& label, const juce::String& tooltip)
+{
+    label.setFont (theme::heading (14.0f));
+    label.setJustificationType (juce::Justification::centred);
+    label.setColour (juce::Label::backgroundColourId, theme::panelLight);
+    label.setColour (juce::Label::outlineColourId, theme::outline);
+    label.setColour (juce::Label::backgroundWhenEditingColourId, theme::panelLight);
+    label.setColour (juce::Label::textWhenEditingColourId, theme::text);
+    label.setColour (juce::Label::outlineWhenEditingColourId, theme::accent);
+    label.setTooltip (tooltip);
 }
 
 //==============================================================================
 SiampleEditor::SiampleEditor (SiampleProcessor& p)
     : AudioProcessorEditor (&p), proc (p), waveform (p),
-      midiDrag (fr ("Glisser le MIDI"),
-                fr ("Attrape ce bouton et glisse-le dans le piano roll ou la playlist : "
-                    "la boucle y est déposée en notes MIDI, une note par tranche.")),
-      sequenceAudioDrag (fr ("Glisser l'audio"),
+      timelineAudioDrag (fr ("Glisser l'audio"),
                          fr ("Attrape ce bouton et glisse-le dans la playlist du DAW : "
-                             "la piste y est déposée en audio, telle que tu l'entends.")),
-      sequenceMidiDrag (fr ("Glisser le MIDI"),
-                        fr ("Attrape ce bouton et glisse-le dans le piano roll : "
-                            "la piste y est déposée en notes MIDI, une note par tranche.")),
-      sequenceLane (p), pads (p), slicePanel (p)
+                             "le montage y est déposé en audio, au tempo du projet, tel que tu l'entends.")),
+      timelineMidiDrag (fr ("Glisser le MIDI"),
+                        fr ("Attrape ce bouton et glisse-le sur la piste Siample du DAW : le montage y est déposé en notes. "
+                            "Chaque sample a son canal MIDI (A = 2, B = 3, C = 4, D = 5).")),
+      timeline (p), browser (p), pads (p), slicePanel (p)
 {
     setLookAndFeel (&lookAndFeel);
 
-    // --- En-tête
-    loadButton.setButtonText (fr ("Charger un sample"));
-    loadButton.onClick = [this] { openFileChooser(); };
-    addAndMakeVisible (loadButton);
+    // --- Ligne du haut
+    styleButton (sliceViewButton, fr ("Découpe"), fr ("Découper le sample affiché : forme d'onde, points de coupe, tempo"));
+    styleButton (montageViewButton, "Montage", fr ("Assembler les tranches de tes samples sur une grille, écouter et exporter"));
+    makeSegment ({ &sliceViewButton, &montageViewButton }, 7104);
+    sliceViewButton.onClick   = [this] { if (sliceViewButton.getToggleState())   showMontage (false); };
+    montageViewButton.onClick = [this] { if (montageViewButton.getToggleState()) showMontage (true); };
 
-    fileLabel.setFont (theme::font (14.0f));
-    fileLabel.setMinimumHorizontalScale (0.8f);
-    addAndMakeVisible (fileLabel);
+    styleButton (undoButton, "Annuler", fr ("Annule la dernière modification"));
+    styleButton (redoButton, fr ("Rétablir"), fr ("Refait la modification annulée"));
+    undoButton.setConnectedEdges (juce::Button::ConnectedOnRight);
+    redoButton.setConnectedEdges (juce::Button::ConnectedOnLeft);
+    undoButton.onClick = [this] { proc.undo(); };
+    redoButton.onClick = [this] { proc.redo(); };
+
+    styleToggle (browseButton, "Parcourir", fr ("Ouvre le navigateur de samples : ton dossier, avec pré-écoute"));
+    browseButton.onClick = [this] { showBrowser (browseButton.getToggleState()); };
+
+    styleButton (menuButton, "Menu", fr ("Presets, export de toutes les tranches, vider le sample"));
+    menuButton.onClick = [this] { showMenu(); };
+
+    for (auto* b : { &sliceViewButton, &montageViewButton, &undoButton, &redoButton, &browseButton, &menuButton })
+        addAndMakeVisible (*b);
+
+    styleCaption (projectCaption, "Projet");
+    projectCaption.setJustificationType (juce::Justification::centredRight);
+    addAndMakeVisible (projectCaption);
+
+    styleValueBox (projectLabel, {});
+    projectLabel.onTextChange = [this]
+    {
+        const double typed = projectLabel.getText().replaceCharacter (',', '.').retainCharacters ("0123456789.").getDoubleValue();
+
+        if (typed >= 30.0 && typed <= 300.0)
+            proc.setProjectBpm (typed);
+
+        shownHostBpm = 0.0;   // force la mise à jour
+        updateStatus();
+    };
+    addAndMakeVisible (projectLabel);
+
+    styleToggle (velocityButton, fr ("Vélocité fixe"), fr ("Toutes les notes jouent à fond, quelle que soit la force de frappe (le « full level » des MPC)"));
+    velocityButton.onClick = [this] { proc.setFullVelocity (velocityButton.getToggleState()); };
+    addAndMakeVisible (velocityButton);
+
+    styleCaption (repeatCaption, fr ("Répét."));
+    repeatCaption.setJustificationType (juce::Justification::centredRight);
+    addAndMakeVisible (repeatCaption);
+
+    repeatBox.addItem ("Non", 1);
+    repeatBox.addItem ("1/4", 4);
+    repeatBox.addItem ("1/8", 8);
+    repeatBox.addItem ("1/16", 16);
+    repeatBox.addItem ("1/32", 32);
+    repeatBox.setTooltip (fr ("Note repeat : tant que tu tiens un pad, la tranche se répète à cette valeur, calée sur le tempo du projet"));
+    repeatBox.onChange = [this] { proc.setNoteRepeat (repeatBox.getSelectedId() == 1 ? 0 : repeatBox.getSelectedId()); };
+    addAndMakeVisible (repeatBox);
 
     styleRotary (grainSlider, this, " %", fr ("Grain vintage : le son granuleux des vieux samplers (moins de bits, moins d'aigus)"));
     addAndMakeVisible (grainSlider);
@@ -72,34 +145,136 @@ SiampleEditor::SiampleEditor (SiampleProcessor& p)
     masterAttachment = std::make_unique<juce::SliderParameterAttachment> (*proc.getMasterGainParameter(), masterSlider);
     masterSlider.setDoubleClickReturnValue (true, 0.0);
 
-    styleBarLabel (grainLabel, "Grain", false);
-    styleBarLabel (masterLabel, "Volume", false);
+    styleCaption (grainCaption, "Grain");
+    styleCaption (masterCaption, "Volume");
 
-    for (auto* l : { &grainLabel, &masterLabel })
+    for (auto* l : { &grainCaption, &masterCaption })
     {
         l->setJustificationType (juce::Justification::centredRight);
         addAndMakeVisible (*l);
     }
 
-    // --- Barre de découpe
-    styleBarLabel (sliceLabel, fr ("Découpe"), true);
-    addAndMakeVisible (sliceLabel);
+    // --- Ligne du sample
+    for (int i = 0; i < numDecks; ++i)
+    {
+        auto& b = deckButtons[(size_t) i];
+        b.setButtonText (deckName (i));
+        b.setClickingTogglesState (true);
+        b.setRadioGroupId (7105);
+        b.setConnectedEdges ((i > 0 ? juce::Button::ConnectedOnLeft : 0) | (i < numDecks - 1 ? juce::Button::ConnectedOnRight : 0));
+        b.onClick = [this, i]
+        {
+            if (deckButtons[(size_t) i].getToggleState() && proc.getActiveDeck() != i)
+            {
+                proc.setActiveDeck (i);
+                errorMessage.clear();
+                changeListenerCallback (nullptr);
+            }
+        };
+        addAndMakeVisible (b);
+    }
 
-    transientsButton.setButtonText ("Transitoires");
-    transientsButton.setTooltip (fr ("Coupe automatiquement à chaque attaque (kick, snare, note…)"));
-    gridButton.setButtonText (fr ("Grille"));
-    gridButton.setTooltip (fr ("Coupe la zone en parts égales, ou en temps d'après le tempo"));
-    manualButton.setButtonText ("Manuel");
-    manualButton.setTooltip (fr ("Tu places les points toi-même : double-clic sur la forme d'onde"));
+    styleButton (loadButton, "Charger", fr ("Charge un fichier audio dans le sample affiché (ou glisse-le sur la fenêtre)"));
+    loadButton.onClick = [this] { openFileChooser(); };
+    addAndMakeVisible (loadButton);
+
+    fileLabel.setFont (theme::font (13.0f));
+    fileLabel.setMinimumHorizontalScale (0.75f);
+    addAndMakeVisible (fileLabel);
+
+    styleCaption (tempoCaption, "Tempo");
+    tempoCaption.setJustificationType (juce::Justification::centredRight);
+    addAndMakeVisible (tempoCaption);
+
+    styleValueBox (bpmLabel, fr ("Tempo du sample, détecté automatiquement. Clique pour le corriger à la main."));
+    bpmLabel.setEditable (true);
+    bpmLabel.onTextChange = [this]
+    {
+        const double typed = bpmLabel.getText().replaceCharacter (',', '.').retainCharacters ("0123456789.").getDoubleValue();
+
+        if (typed >= 30.0 && typed <= 300.0)
+            proc.setSampleBpm (typed);
+
+        refresh();
+    };
+    addAndMakeVisible (bpmLabel);
+
+    styleButton (halfButton, fr ("÷2"), fr ("Divise le tempo par deux, si la détection a compté deux fois trop vite"));
+    halfButton.onClick = [this] { proc.setSampleBpm (proc.getSampleBpm() * 0.5); refresh(); };
+    styleButton (doubleButton, fr ("×2"), fr ("Double le tempo, si la détection a compté deux fois trop lentement"));
+    doubleButton.onClick = [this] { proc.setSampleBpm (proc.getSampleBpm() * 2.0); refresh(); };
+    styleButton (autoButton, "Auto", fr ("Relance la détection automatique du tempo sur la zone de travail"));
+    autoButton.onClick = [this] { proc.detectBpm(); refresh(); };
+    halfButton.setConnectedEdges (juce::Button::ConnectedOnRight);
+    doubleButton.setConnectedEdges (juce::Button::ConnectedOnLeft);
+
+    styleToggle (syncButton, "Sync", fr ("Les tranches de ce sample suivent le tempo du projet, et le pitch ne change plus leur durée. "
+                                         "À activer sur chaque sample pour qu'ils tombent ensemble dans le montage."));
+    syncButton.onClick = [this] { proc.setSyncEnabled (syncButton.getToggleState()); refresh(); };
+
+    for (auto* b : { &halfButton, &doubleButton, &autoButton, &syncButton })
+        addAndMakeVisible (*b);
+
+    styleCaption (keyCaption, fr ("Tonalité"));
+    keyCaption.setJustificationType (juce::Justification::centredRight);
+    addAndMakeVisible (keyCaption);
+
+    keyLabel.setFont (theme::font (13.0f, true));
+    keyLabel.setJustificationType (juce::Justification::centred);
+    keyLabel.setMinimumHorizontalScale (0.75f);
+    keyLabel.setTooltip (fr ("Tonalité estimée du sample (après transposition). C'est une estimation : fie-toi à ton oreille."));
+    addAndMakeVisible (keyLabel);
+
+    styleButton (transposeDownButton, "-", fr ("Transpose tout le sample d'un demi-ton vers le bas"));
+    styleButton (transposeUpButton, "+", fr ("Transpose tout le sample d'un demi-ton vers le haut"));
+    transposeDownButton.setConnectedEdges (juce::Button::ConnectedOnRight);
+    transposeUpButton.setConnectedEdges (juce::Button::ConnectedOnLeft);
+    transposeDownButton.onClick = [this] { proc.deck().setTranspose (proc.deck().getTranspose() - 1); refresh(); };
+    transposeUpButton.onClick   = [this] { proc.deck().setTranspose (proc.deck().getTranspose() + 1); refresh(); };
+    addAndMakeVisible (transposeDownButton);
+    addAndMakeVisible (transposeUpButton);
+
+    transposeLabel.setFont (theme::font (13.0f));
+    transposeLabel.setJustificationType (juce::Justification::centred);
+    transposeLabel.setColour (juce::Label::backgroundColourId, theme::panelLight);
+    transposeLabel.setTooltip (fr ("Transposition de tout le sample, en demi-tons. Avec Sync, la durée ne change pas."));
+    addAndMakeVisible (transposeLabel);
+
+    targetKeyBox.setTextWhenNothingSelected (fr ("Vers…"));
+    for (int root = 0; root < 12; ++root)
+        targetKeyBox.addItem (keyName (root, false).upToFirstOccurrenceOf (" ", false, false), root + 1);
+    targetKeyBox.setTooltip (fr ("Choisis la tonalité de ton morceau : le sample est transposé par le plus court chemin"));
+    targetKeyBox.onChange = [this]
+    {
+        const auto key = proc.deck().getDetectedKey();
+
+        if (targetKeyBox.getSelectedId() > 0 && key.isValid())
+        {
+            int shift = (targetKeyBox.getSelectedId() - 1 - key.root) % 12;
+
+            if (shift > 6)   shift -= 12;
+            if (shift < -5)  shift += 12;
+
+            proc.deck().setTranspose (shift);
+            refresh();
+        }
+    };
+    addAndMakeVisible (targetKeyBox);
+
+    // --- Vue Découpe
+    styleCaption (sliceCaption, fr ("Découpe"));
+    addAndMakeVisible (sliceCaption);
+
+    styleButton (transientsButton, "Transitoires", fr ("Coupe automatiquement à chaque attaque (kick, snare, note…)"));
+    styleButton (gridButton, "Grille", fr ("Coupe la zone en parts égales, ou en temps d'après le tempo"));
+    styleButton (manualButton, "Manuel", fr ("Tu places les points toi-même : double-clic sur la forme d'onde"));
+    makeSegment ({ &transientsButton, &gridButton, &manualButton }, 7100);
 
     juce::TextButton* modeButtons[] = { &transientsButton, &gridButton, &manualButton };
 
     for (int i = 0; i < 3; ++i)
     {
         auto* b = modeButtons[i];
-        b->setClickingTogglesState (true);
-        b->setRadioGroupId (7100);
-        b->setConnectedEdges ((i > 0 ? juce::Button::ConnectedOnLeft : 0) | (i < 2 ? juce::Button::ConnectedOnRight : 0));
         b->onClick = [this, b, i]
         {
             if (b->getToggleState())
@@ -111,7 +286,8 @@ SiampleEditor::SiampleEditor (SiampleProcessor& p)
         addAndMakeVisible (*b);
     }
 
-    styleBarLabel (optionLabel, {}, false);
+    optionLabel.setFont (theme::font (12.0f));
+    optionLabel.setColour (juce::Label::textColourId, theme::textDim);
     optionLabel.setJustificationType (juce::Justification::centredRight);
     addAndMakeVisible (optionLabel);
 
@@ -147,158 +323,142 @@ SiampleEditor::SiampleEditor (SiampleProcessor& p)
     };
     addAndMakeVisible (divisionsBox);
 
-    styleBarLabel (countLabel, {}, false);
-    countLabel.setJustificationType (juce::Justification::centredRight);
+    countLabel.setFont (theme::font (13.0f, true));
+    countLabel.setMinimumHorizontalScale (0.8f);
     addAndMakeVisible (countLabel);
 
-    // --- Barre de tempo et de jeu
-    styleBarLabel (tempoLabel, "Tempo", true);
-    addAndMakeVisible (tempoLabel);
+    styleButton (normaliseButton, "Niveler", fr ("Met toutes les tranches au même niveau : les chops faibles sortent aussi fort que les autres"));
+    normaliseButton.onClick = [this] { proc.deck().normaliseSlices(); refresh(); };
+    addAndMakeVisible (normaliseButton);
 
-    bpmLabel.setFont (theme::font (14.0f, true));
-    bpmLabel.setJustificationType (juce::Justification::centred);
-    bpmLabel.setEditable (true);
-    bpmLabel.setColour (juce::Label::backgroundColourId, theme::panelLight);
-    bpmLabel.setColour (juce::Label::outlineColourId, theme::outline);
-    bpmLabel.setColour (juce::Label::backgroundWhenEditingColourId, theme::panelLight);
-    bpmLabel.setColour (juce::Label::textWhenEditingColourId, theme::text);
-    bpmLabel.setColour (juce::Label::outlineWhenEditingColourId, theme::accent);
-    bpmLabel.setTooltip (fr ("Tempo du sample, détecté automatiquement. Clique pour le corriger à la main."));
-    bpmLabel.onTextChange = [this]
-    {
-        const double typed = bpmLabel.getText().replaceCharacter (',', '.').retainCharacters ("0123456789.").getDoubleValue();
+    styleCaption (playCaption, "Jeu");
+    playCaption.setJustificationType (juce::Justification::centredRight);
+    addAndMakeVisible (playCaption);
 
-        if (typed >= 30.0 && typed <= 300.0)
-            proc.setSampleBpm (typed);
-
-        refresh();
-    };
-    addAndMakeVisible (bpmLabel);
-
-    halfButton.setButtonText (fr ("÷2"));
-    halfButton.setTooltip (fr ("Divise le tempo par deux, si la détection a compté deux fois trop vite"));
-    halfButton.onClick = [this] { proc.setSampleBpm (proc.getSampleBpm() * 0.5); refresh(); };
-    doubleButton.setButtonText (fr ("×2"));
-    doubleButton.setTooltip (fr ("Double le tempo, si la détection a compté deux fois trop lentement"));
-    doubleButton.onClick = [this] { proc.setSampleBpm (proc.getSampleBpm() * 2.0); refresh(); };
-    autoButton.setButtonText ("Auto");
-    autoButton.setTooltip (fr ("Relance la détection automatique du tempo sur la zone de travail"));
-    autoButton.onClick = [this] { proc.detectBpm(); refresh(); };
-    halfButton.setConnectedEdges (juce::Button::ConnectedOnRight);
-    doubleButton.setConnectedEdges (juce::Button::ConnectedOnLeft);
-
-    for (auto* b : { &halfButton, &doubleButton, &autoButton })
-        addAndMakeVisible (*b);
-
-    styleToggle (syncButton, "Sync", fr ("Les tranches suivent le tempo du projet, et le pitch ne change plus leur durée"));
-    syncButton.onClick = [this] { proc.setSyncEnabled (syncButton.getToggleState()); refresh(); };
-    addAndMakeVisible (syncButton);
-
-    styleBarLabel (hostLabel, {}, false);
-    addAndMakeVisible (hostLabel);
-
-    styleBarLabel (playLabel, "Jeu", true);
-    playLabel.setJustificationType (juce::Justification::centredRight);
-    addAndMakeVisible (playLabel);
-
-    styleToggle (padsButton, "Pads", fr ("Une note par tranche : la tranche 1 est sur la note ") + noteName (baseNote));
-    styleToggle (keysButton, "Clavier", fr ("Tout le clavier joue la tranche sélectionnée ; la note ")
+    styleButton (padsButton, "Pads", fr ("Une note par tranche : la tranche 1 est sur la note ") + noteName (baseNote));
+    styleButton (keysButton, "Clavier", fr ("Tout le clavier joue la tranche sélectionnée ; la note ")
                                             + noteName (keyboardRootNote) + fr (" donne sa hauteur d'origine"));
-    padsButton.setRadioGroupId (7103);
-    keysButton.setRadioGroupId (7103);
-    padsButton.setConnectedEdges (juce::Button::ConnectedOnRight);
-    keysButton.setConnectedEdges (juce::Button::ConnectedOnLeft);
+    makeSegment ({ &padsButton, &keysButton }, 7103);
     padsButton.onClick = [this] { if (padsButton.getToggleState()) { proc.setPlayMode (PlayMode::pads); refresh(); } };
     keysButton.onClick = [this] { if (keysButton.getToggleState()) { proc.setPlayMode (PlayMode::keys); refresh(); } };
     addAndMakeVisible (padsButton);
     addAndMakeVisible (keysButton);
 
-    styleToggle (monoButton, "Mono", fr ("Chaque nouvelle note coupe la précédente : les tranches ne se chevauchent plus"));
+    styleToggle (monoButton, "Mono", fr ("Chaque nouvelle note coupe la précédente : les tranches de ce sample ne se chevauchent plus"));
     monoButton.onClick = [this] { proc.setMono (monoButton.getToggleState()); refresh(); };
     addAndMakeVisible (monoButton);
 
-    // --- Zone principale
     waveform.onEdit   = [this] { refresh(); };
     waveform.onSelect = [this] { selectionChanged(); };
     addAndMakeVisible (waveform);
 
-    hintLabel.setFont (theme::font (12.0f));
+    // --- Vue Montage
+    styleToggle (listenButton, fr ("Écouter"), fr ("Joue le montage en boucle, au tempo du projet"));
+    listenButton.onClick = [this] { proc.setTimelinePlaying (listenButton.getToggleState()); refresh(); };
+    addChildComponent (listenButton);
+
+    styleCaption (barsCaption, "Mesures");
+    styleCaption (snapCaption, "Grille");
+
+    for (auto* l : { &barsCaption, &snapCaption })
+    {
+        l->setJustificationType (juce::Justification::centredRight);
+        addChildComponent (*l);
+    }
+
+    for (int bars : { 1, 2, 4, 8, 16 })
+        barsBox.addItem (juce::String (bars), bars);
+    barsBox.setTooltip (fr ("Longueur du montage, en mesures de 4 temps"));
+    barsBox.onChange = [this] { if (barsBox.getSelectedId() > 0) { proc.setTimelineBars (barsBox.getSelectedId()); refresh(); } };
+    addChildComponent (barsBox);
+
+    snapBox.addItem ("Libre", 1);
+    snapBox.addItem ("1/4", 4);
+    snapBox.addItem ("1/8", 8);
+    snapBox.addItem ("1/16", 16);
+    snapBox.addItem ("1/32", 32);
+    snapBox.setTooltip (fr ("Les blocs s'aimantent à cette grille. Maj enfoncée : déplacement libre."));
+    snapBox.onChange = [this] { proc.setSnap (snapBox.getSelectedId() == 1 ? 0 : snapBox.getSelectedId()); refresh(); };
+    addChildComponent (snapBox);
+
+    for (int i = 0; i < numVariants; ++i)
+    {
+        auto& b = variantButtons[(size_t) i];
+        b.setButtonText (juce::String (i + 1));
+        b.setClickingTogglesState (true);
+        b.setRadioGroupId (7106);
+        b.setConnectedEdges ((i > 0 ? juce::Button::ConnectedOnLeft : 0) | (i < numVariants - 1 ? juce::Button::ConnectedOnRight : 0));
+        b.setTooltip (fr ("Variante ") + juce::String (i + 1) + fr (" du montage : trois versions à comparer. "
+                          "Une variante vide reprend la copie de celle que tu quittes."));
+        b.onClick = [this, i]
+        {
+            if (variantButtons[(size_t) i].getToggleState() && proc.getVariant() != i)
+            {
+                const int previous = proc.getVariant();
+
+                // On part de ce qu'on a déjà plutôt que d'une page blanche
+                if (proc.getNumClipsIn (i) == 0 && proc.getNumClipsIn (previous) > 0)
+                    proc.copyVariant (previous, i);
+
+                proc.setVariant (i);
+                refresh();
+            }
+        };
+        addChildComponent (b);
+    }
+
+    styleButton (orderButton, "Dans l'ordre", fr ("Pose la boucle du sample affiché sur sa ligne, dans son ordre d'origine"));
+    orderButton.onClick = [this] { proc.fillLane (proc.getActiveDeck(), false); refresh(); };
+    styleButton (flipButton, "Flip", fr ("Réarrange au hasard les tranches du sample affiché, en gardant le rythme d'origine. Reclique pour une autre idée."));
+    flipButton.onClick = [this] { proc.fillLane (proc.getActiveDeck(), true); refresh(); };
+    styleButton (clearButton, "Vider", fr ("Retire tous les blocs de cette variante"));
+    clearButton.onClick = [this] { proc.clearClips(); refresh(); };
+
+    for (auto* b : { &orderButton, &flipButton, &clearButton })
+        addChildComponent (*b);
+
+    timelineInfoLabel.setFont (theme::font (12.0f));
+    timelineInfoLabel.setColour (juce::Label::textColourId, theme::textDim);
+    timelineInfoLabel.setJustificationType (juce::Justification::centredRight);
+    timelineInfoLabel.setMinimumHorizontalScale (0.75f);
+    addChildComponent (timelineInfoLabel);
+
+    timelineAudioDrag.createFile = [this] { return proc.createTimelineAudioFile(); };
+    timelineMidiDrag.createFile  = [this] { return proc.createTimelineMidiFile(); };
+    addChildComponent (timelineAudioDrag);
+    addChildComponent (timelineMidiDrag);
+
+    timeline.onEdit   = [this] { refresh(); };
+    timeline.onSelect = [this] { errorMessage.clear(); changeListenerCallback (nullptr); };
+    addChildComponent (timeline);
+
+    hintLabel.setFont (theme::font (11.5f));
     hintLabel.setColour (juce::Label::textColourId, theme::textDim);
     hintLabel.setMinimumHorizontalScale (0.7f);
     addAndMakeVisible (hintLabel);
 
-    // --- Barre de boucle
-    styleBarLabel (loopLabel, "Boucle", true);
-    addAndMakeVisible (loopLabel);
+    // --- Bas et navigateur
+    browser.onLoad = [this] (const juce::File& file) { loadFile (file); };
+    addChildComponent (browser);
 
-    styleToggle (listenButton, fr ("Écouter"), fr ("Joue la boucle en continu, dans l'ordre affiché"));
-    listenButton.onClick = [this] { proc.setPatternPlaying (listenButton.getToggleState()); refresh(); };
-    addAndMakeVisible (listenButton);
-
-    flipButton.setButtonText ("Flip");
-    flipButton.setTooltip (fr ("Réarrange les tranches au hasard, en gardant le rythme d'origine. Reclique pour une autre idée."));
-    flipButton.onClick = [this] { proc.flipPattern(); refresh(); };
-    addAndMakeVisible (flipButton);
-
-    originalButton.setButtonText ("Original");
-    originalButton.setTooltip (fr ("Revient à l'ordre d'origine des tranches"));
-    originalButton.onClick = [this] { proc.resetPattern(); refresh(); };
-    addAndMakeVisible (originalButton);
-
-    midiDrag.createFile = [this] { return proc.createPatternMidiFile(); };
-    addAndMakeVisible (midiDrag);
-
-    styleBarLabel (loopInfoLabel, {}, false);
-    addAndMakeVisible (loopInfoLabel);
-
-    // --- Piste
-    styleBarLabel (sequenceLabel, "Piste", true);
-    addAndMakeVisible (sequenceLabel);
-
-    styleToggle (sequenceListenButton, fr ("Écouter"), fr ("Joue la piste en continu : les tranches s'enchaînent dans l'ordre affiché"));
-    sequenceListenButton.onClick = [this] { proc.setSequencePlaying (sequenceListenButton.getToggleState()); refresh(); };
-    addAndMakeVisible (sequenceListenButton);
-
-    sequenceAddButton.setTooltip (fr ("Ajoute la tranche sélectionnée à la fin de la piste. Tu peux aussi glisser un pad sur la piste."));
-    sequenceAddButton.onClick = [this] { proc.insertSequenceStep (proc.getSelectedSlice()); refresh(); };
-    addAndMakeVisible (sequenceAddButton);
-
-    sequenceClearButton.setButtonText ("Vider");
-    sequenceClearButton.setTooltip (fr ("Retire toutes les tranches de la piste"));
-    sequenceClearButton.onClick = [this] { proc.clearSequence(); refresh(); };
-    addAndMakeVisible (sequenceClearButton);
-
-    sequenceAudioDrag.createFile = [this] { return proc.createSequenceAudioFile(); };
-    sequenceMidiDrag.createFile  = [this] { return proc.createSequenceMidiFile(); };
-    addAndMakeVisible (sequenceAudioDrag);
-    addAndMakeVisible (sequenceMidiDrag);
-
-    styleBarLabel (sequenceInfoLabel, {}, false);
-    addAndMakeVisible (sequenceInfoLabel);
-
-    sequenceLane.onEdit   = [this] { refresh(); };
-    sequenceLane.onSelect = [this] { selectionChanged(); };
-    addAndMakeVisible (sequenceLane);
-
-    // --- Bas
     pads.onSelect = [this] { selectionChanged(); };
     addAndMakeVisible (pads);
 
-    slicePanel.onEdit = [this] { waveform.repaint(); };
+    slicePanel.onEdit = [this] { waveform.repaint(); timeline.repaint(); undoButton.setEnabled (proc.canUndo()); };
     addAndMakeVisible (slicePanel);
 
     proc.addChangeListener (this);
 
     setResizable (true, true);
-    setResizeLimits (900, 740, 1800, 1400);
-    setSize (1020, 860);
+    setResizeLimits (minimumWidth, 720, 1900, 1400);
+    setSize (1120, 800);
 
     // les composants créés avant l'application du thème reprennent ses couleurs
     sendLookAndFeelChange();
 
     shownSample = proc.getSample();
     waveform.sampleChanged();
-    refresh();
+    showMontage (proc.getShownView() == 1);
     startTimerHz (30);
 }
 
@@ -312,6 +472,51 @@ SiampleEditor::~SiampleEditor()
 }
 
 //==============================================================================
+void SiampleEditor::showMontage (bool shouldShowMontage)
+{
+    montageVisible = shouldShowMontage;
+    proc.setShownView (montageVisible ? 1 : 0);
+    (montageVisible ? montageViewButton : sliceViewButton).setToggleState (true, juce::dontSendNotification);
+
+    for (auto* c : std::initializer_list<juce::Component*> { &sliceCaption, &transientsButton, &gridButton, &manualButton, &optionLabel,
+                                                              &countLabel, &normaliseButton, &playCaption, &padsButton, &keysButton,
+                                                              &monoButton, &waveform })
+        c->setVisible (! montageVisible);
+
+    for (auto* c : std::initializer_list<juce::Component*> { &listenButton, &barsCaption, &barsBox, &snapCaption, &snapBox, &orderButton,
+                                                              &flipButton, &clearButton, &timelineInfoLabel, &timelineAudioDrag,
+                                                              &timelineMidiDrag, &timeline })
+        c->setVisible (montageVisible);
+
+    for (auto& b : variantButtons)
+        b.setVisible (montageVisible);
+
+    resized();
+    refresh();
+}
+
+void SiampleEditor::showBrowser (bool shouldShow)
+{
+    if (browserVisible == shouldShow)
+        return;
+
+    browserVisible = shouldShow;
+    browseButton.setToggleState (shouldShow, juce::dontSendNotification);
+    browser.setVisible (shouldShow);
+
+    if (! shouldShow)
+        proc.stopPreview();
+
+    // Le navigateur s'ajoute à gauche : la fenêtre s'élargit d'autant, le reste ne bouge pas
+    const int extra = browserWidth + 12;
+    const int width = getWidth() + (shouldShow ? extra : -extra);
+    setResizeLimits (minimumWidth + (shouldShow ? extra : 0), 720, 1900 + extra, 1400);
+    setSize (juce::jmax (minimumWidth, width), getHeight());
+    resized();
+    repaint();
+}
+
+//==============================================================================
 void SiampleEditor::paint (juce::Graphics& g)
 {
     g.fillAll (theme::background);
@@ -319,109 +524,171 @@ void SiampleEditor::paint (juce::Graphics& g)
     // Nom du plugin
     juce::AttributedString name;
     name.setJustification (juce::Justification::centredLeft);
-    name.append ("Si", theme::font (24.0f, true), theme::accent);
-    name.append ("ample", theme::font (24.0f, true), theme::text);
-    name.draw (g, getLocalBounds().reduced (16, 0).removeFromTop (56).removeFromLeft (118).toFloat());
+    name.append ("Si", theme::heading (23.0f), theme::accent);
+    name.append ("ample", theme::heading (23.0f), theme::text);
+    name.draw (g, juce::Rectangle<float> (18.0f, 12.0f, 110.0f, 36.0f));
+
+    theme::drawCard (g, middleCard);
 }
 
 void SiampleEditor::resized()
 {
-    auto area = getLocalBounds().reduced (16, 0);
+    auto area = getLocalBounds().reduced (18, 0);
+    area.removeFromTop (12);
+    area.removeFromBottom (14);
 
-    // En-tête
-    auto header = area.removeFromTop (56);
-    header.removeFromLeft (118);
-    loadButton.setBounds (header.removeFromLeft (150).withSizeKeepingCentre (150, 30));
-    header.removeFromLeft (12);
-    masterSlider.setBounds (header.removeFromRight (44).withSizeKeepingCentre (44, 44));
-    masterLabel.setBounds (header.removeFromRight (56));
-    header.removeFromRight (6);
-    grainSlider.setBounds (header.removeFromRight (44).withSizeKeepingCentre (44, 44));
-    grainLabel.setBounds (header.removeFromRight (46));
-    fileLabel.setBounds (header);
+    // --- Ligne du haut
+    {
+        auto row = area.removeFromTop (36).reduced (0, 2);
+        // Fenêtre étroite : les deux potards se passent de leur nom (il reste dans l'info-bulle)
+        const bool compact = row.getWidth() < 1070;
+        grainCaption.setVisible (! compact);
+        masterCaption.setVisible (! compact);
 
-    // Barre de découpe
-    auto bar = area.removeFromTop (30);
-    sliceLabel.setBounds (bar.removeFromLeft (70));
-    transientsButton.setBounds (bar.removeFromLeft (104));
-    gridButton.setBounds (bar.removeFromLeft (70));
-    manualButton.setBounds (bar.removeFromLeft (76));
-    bar.removeFromLeft (10);
-    countLabel.setBounds (bar.removeFromRight (110));
-    optionLabel.setBounds (bar.removeFromLeft (86));
-    bar.removeFromLeft (6);
-    const auto optionArea = bar.removeFromLeft (juce::jmin (240, bar.getWidth()));
-    sensitivitySlider.setBounds (optionArea);
-    divisionsBox.setBounds (optionArea.withWidth (juce::jmin (150, optionArea.getWidth())));
+        row.removeFromLeft (106);
+        sliceViewButton.setBounds (row.removeFromLeft (76));
+        montageViewButton.setBounds (row.removeFromLeft (76));
+        row.removeFromLeft (10);
+        undoButton.setBounds (row.removeFromLeft (62));
+        redoButton.setBounds (row.removeFromLeft (62));
+        row.removeFromLeft (10);
+        browseButton.setBounds (row.removeFromLeft (76));
+        row.removeFromLeft (6);
+        menuButton.setBounds (row.removeFromLeft (54));
+
+        masterSlider.setBounds (row.removeFromRight (36).expanded (0, 2));
+        masterCaption.setBounds (row.removeFromRight (compact ? 4 : 54));
+        grainSlider.setBounds (row.removeFromRight (36).expanded (0, 2));
+        grainCaption.setBounds (row.removeFromRight (compact ? 4 : 46));
+        row.removeFromRight (8);
+        repeatBox.setBounds (row.removeFromRight (68));
+        row.removeFromRight (6);
+        repeatCaption.setBounds (row.removeFromRight (48));
+        row.removeFromRight (8);
+        velocityButton.setBounds (row.removeFromRight (94));
+        row.removeFromRight (10);
+        projectLabel.setBounds (row.removeFromRight (58));
+        row.removeFromRight (6);
+        projectCaption.setBounds (row.removeFromRight (juce::jmin (58, juce::jmax (0, row.getWidth()))));
+    }
 
     area.removeFromTop (8);
 
-    // Barre de tempo et de jeu
-    bar = area.removeFromTop (30);
-    tempoLabel.setBounds (bar.removeFromLeft (70));
-    bpmLabel.setBounds (bar.removeFromLeft (70).reduced (0, 1));
-    bar.removeFromLeft (6);
-    halfButton.setBounds (bar.removeFromLeft (34));
-    doubleButton.setBounds (bar.removeFromLeft (34));
-    bar.removeFromLeft (6);
-    autoButton.setBounds (bar.removeFromLeft (52));
-    bar.removeFromLeft (14);
-    syncButton.setBounds (bar.removeFromLeft (64));
-    bar.removeFromLeft (8);
-    monoButton.setBounds (bar.removeFromRight (64));
-    bar.removeFromRight (8);
-    keysButton.setBounds (bar.removeFromRight (70));
-    padsButton.setBounds (bar.removeFromRight (60));
-    playLabel.setBounds (bar.removeFromRight (40));
-    hostLabel.setBounds (bar);
+    // --- Ligne du sample
+    {
+        auto row = area.removeFromTop (32);
+
+        for (auto& b : deckButtons)
+            b.setBounds (row.removeFromLeft (36));
+
+        row.removeFromLeft (10);
+        loadButton.setBounds (row.removeFromLeft (74));
+        row.removeFromLeft (10);
+
+        targetKeyBox.setBounds (row.removeFromRight (76));
+        row.removeFromRight (6);
+        transposeUpButton.setBounds (row.removeFromRight (26));
+        transposeLabel.setBounds (row.removeFromRight (48));
+        transposeDownButton.setBounds (row.removeFromRight (26));
+        row.removeFromRight (4);
+        keyLabel.setBounds (row.removeFromRight (70));
+        keyCaption.setBounds (row.removeFromRight (72));
+        row.removeFromRight (10);
+        syncButton.setBounds (row.removeFromRight (62));
+        row.removeFromRight (6);
+        autoButton.setBounds (row.removeFromRight (48));
+        row.removeFromRight (4);
+        doubleButton.setBounds (row.removeFromRight (34));
+        halfButton.setBounds (row.removeFromRight (34));
+        row.removeFromRight (4);
+        bpmLabel.setBounds (row.removeFromRight (62));
+        row.removeFromRight (6);
+        tempoCaption.setBounds (row.removeFromRight (52));
+        row.removeFromRight (8);
+        fileLabel.setBounds (row.withSizeKeepingCentre (row.getWidth(), 18));
+    }
 
     area.removeFromTop (10);
-    area.removeFromBottom (14);
 
-    // Bas : pads à gauche, réglages à droite
-    const int bottomHeight = juce::jlimit (270, 350, area.getHeight() * 42 / 100);
+    // --- Navigateur (à gauche, sur toute la hauteur restante)
+    if (browserVisible)
+    {
+        browser.setBounds (area.removeFromLeft (browserWidth));
+        area.removeFromLeft (12);
+    }
+
+    // --- Bas : pads et réglages de la tranche
+    const int bottomHeight = juce::jlimit (268, 330, area.getHeight() * 41 / 100);
     auto bottom = area.removeFromBottom (bottomHeight);
-    const int padsWidth = juce::jmin (bottom.getWidth() * 40 / 100, (bottomHeight - 32) * 5 / 4);
-    pads.setBounds (bottom.removeFromLeft (padsWidth));
-    bottom.removeFromLeft (14);
+    pads.setBounds (bottom.removeFromLeft (juce::jlimit (300, 380, bottom.getWidth() * 36 / 100)));
+    bottom.removeFromLeft (12);
     slicePanel.setBounds (bottom);
-
-    // Piste
     area.removeFromBottom (12);
-    sequenceLane.setBounds (area.removeFromBottom (52));
-    area.removeFromBottom (6);
-    bar = area.removeFromBottom (30);
-    sequenceLabel.setBounds (bar.removeFromLeft (70));
-    sequenceListenButton.setBounds (bar.removeFromLeft (84));
-    bar.removeFromLeft (8);
-    sequenceAddButton.setBounds (bar.removeFromLeft (112));
-    bar.removeFromLeft (4);
-    sequenceClearButton.setBounds (bar.removeFromLeft (60));
-    bar.removeFromLeft (12);
-    sequenceAudioDrag.setBounds (bar.removeFromLeft (124));
-    bar.removeFromLeft (6);
-    sequenceMidiDrag.setBounds (bar.removeFromLeft (124));
-    bar.removeFromLeft (10);
-    sequenceInfoLabel.setBounds (bar);
 
-    // Barre de boucle
-    area.removeFromBottom (10);
-    bar = area.removeFromBottom (30);
-    loopLabel.setBounds (bar.removeFromLeft (70));
-    listenButton.setBounds (bar.removeFromLeft (84));
-    bar.removeFromLeft (8);
-    flipButton.setBounds (bar.removeFromLeft (64));
-    bar.removeFromLeft (4);
-    originalButton.setBounds (bar.removeFromLeft (80));
-    bar.removeFromLeft (12);
-    midiDrag.setBounds (bar.removeFromLeft (124));
-    bar.removeFromLeft (10);
-    loopInfoLabel.setBounds (bar);
+    // --- Carte du milieu : la découpe ou le montage
+    middleCard = area;
+    auto card = area.reduced (14, 10);
+    auto bar = card.removeFromTop (30);
+    hintLabel.setBounds (card.removeFromBottom (16));
+    card.removeFromBottom (4);
+    card.removeFromTop (8);
 
-    area.removeFromBottom (6);
-    hintLabel.setBounds (area.removeFromBottom (20));
-    area.removeFromBottom (2);
-    waveform.setBounds (area);
+    waveform.setBounds (card);
+    timeline.setBounds (card);
+
+    if (! montageVisible)
+    {
+        sliceCaption.setBounds (bar.removeFromLeft (70));
+        transientsButton.setBounds (bar.removeFromLeft (96));
+        gridButton.setBounds (bar.removeFromLeft (58));
+        manualButton.setBounds (bar.removeFromLeft (66));
+        bar.removeFromLeft (8);
+
+        monoButton.setBounds (bar.removeFromRight (56));
+        bar.removeFromRight (8);
+        keysButton.setBounds (bar.removeFromRight (64));
+        padsButton.setBounds (bar.removeFromRight (52));
+        bar.removeFromRight (4);
+        playCaption.setBounds (bar.removeFromRight (36));
+
+        optionLabel.setBounds (bar.removeFromLeft (72));
+        bar.removeFromLeft (8);
+        const auto option = bar.removeFromLeft (juce::jlimit (90, 160, bar.getWidth() - 190));
+        sensitivitySlider.setBounds (option);
+        divisionsBox.setBounds (option);
+        bar.removeFromLeft (12);
+        countLabel.setBounds (bar.removeFromLeft (84));
+        bar.removeFromLeft (4);
+        normaliseButton.setBounds (bar.removeFromLeft (juce::jmin (64, juce::jmax (0, bar.getWidth()))));
+    }
+    else
+    {
+        listenButton.setBounds (bar.removeFromLeft (82));
+        bar.removeFromLeft (4);
+        barsCaption.setBounds (bar.removeFromLeft (66));
+        bar.removeFromLeft (6);
+        barsBox.setBounds (bar.removeFromLeft (56));
+        snapCaption.setBounds (bar.removeFromLeft (56));
+        bar.removeFromLeft (6);
+        snapBox.setBounds (bar.removeFromLeft (70));
+        bar.removeFromLeft (12);
+
+        for (auto& b : variantButtons)
+            b.setBounds (bar.removeFromLeft (30));
+
+        bar.removeFromLeft (12);
+        orderButton.setBounds (bar.removeFromLeft (94));
+        bar.removeFromLeft (4);
+        flipButton.setBounds (bar.removeFromLeft (46));
+        bar.removeFromLeft (4);
+        clearButton.setBounds (bar.removeFromLeft (52));
+
+        timelineMidiDrag.setBounds (bar.removeFromRight (116));
+        bar.removeFromRight (6);
+        timelineAudioDrag.setBounds (bar.removeFromRight (116));
+        bar.removeFromRight (8);
+        timelineInfoLabel.setBounds (bar);
+    }
 }
 
 //==============================================================================
@@ -455,8 +722,7 @@ void SiampleEditor::filesDropped (const juce::StringArray& files, int, int)
 
 void SiampleEditor::openFileChooser()
 {
-    const auto start = proc.hasSample() ? proc.getSample()->file.getParentDirectory()
-                                        : juce::File::getSpecialLocation (juce::File::userMusicDirectory);
+    const auto start = proc.hasSample() ? proc.getSample()->file.getParentDirectory() : browser.getFolder();
 
     chooser = std::make_unique<juce::FileChooser> (fr ("Choisis un sample"), start,
                                                    proc.getFormatManager().getWildcardForAllFormats());
@@ -483,6 +749,85 @@ void SiampleEditor::loadFile (const juce::File& file)
 }
 
 //==============================================================================
+void SiampleEditor::showMenu()
+{
+    juce::PopupMenu menu;
+    menu.addItem (1, fr ("Enregistrer un preset…"));
+    menu.addItem (2, fr ("Charger un preset…"));
+    menu.addSeparator();
+    menu.addItem (3, fr ("Exporter toutes les tranches du sample ") + deckName (proc.getActiveDeck()) + " en WAV",
+                  proc.hasSample() && proc.getNumSlices() > 0);
+    menu.addItem (4, fr ("Vider le sample ") + deckName (proc.getActiveDeck()),
+                  proc.hasSample() || proc.getMissingFilePath().isNotEmpty());
+
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (menuButton),
+                        [safe = juce::Component::SafePointer<SiampleEditor> (this)] (int choice)
+                        {
+                            if (safe == nullptr)
+                                return;
+
+                            if (choice == 1)  safe->savePreset();
+                            if (choice == 2)  safe->loadPreset();
+
+                            if (choice == 3)
+                            {
+                                // Les fichiers sont écrits dans un dossier, qu'on ouvre : il n'y a plus qu'à les glisser où l'on veut
+                                const auto files = safe->proc.createAllSliceAudioFiles();
+
+                                if (! files.isEmpty())
+                                    files.getFirst().revealToUser();
+                            }
+
+                            if (choice == 4)
+                            {
+                                safe->proc.deck().unload();
+                                safe->errorMessage.clear();
+                                safe->changeListenerCallback (nullptr);
+                            }
+                        });
+}
+
+void SiampleEditor::savePreset()
+{
+    const auto folder = juce::File::getSpecialLocation (juce::File::userDocumentsDirectory).getChildFile ("Siample");
+    folder.createDirectory();
+    const auto name = proc.hasSample() ? proc.getSample()->file.getFileNameWithoutExtension() : juce::String ("Preset");
+
+    chooser = std::make_unique<juce::FileChooser> (fr ("Enregistrer le preset"), folder.getChildFile (name + ".siample"), "*.siample");
+    chooser->launchAsync (juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles
+                              | juce::FileBrowserComponent::warnAboutOverwriting,
+                          [this] (const juce::FileChooser& fc)
+                          {
+                              auto file = fc.getResult();
+
+                              if (file == juce::File())
+                                  return;
+
+                              if (! proc.savePreset (file.withFileExtension ("siample")))
+                              {
+                                  errorMessage = fr ("Impossible d'écrire le preset");
+                                  refresh();
+                              }
+                          });
+}
+
+void SiampleEditor::loadPreset()
+{
+    const auto folder = juce::File::getSpecialLocation (juce::File::userDocumentsDirectory).getChildFile ("Siample");
+
+    chooser = std::make_unique<juce::FileChooser> (fr ("Charger un preset"), folder, "*.siample");
+    chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+                          [this] (const juce::FileChooser& fc)
+                          {
+                              if (fc.getResult().existsAsFile())
+                              {
+                                  errorMessage = proc.loadPreset (fc.getResult());
+                                  changeListenerCallback (nullptr);
+                              }
+                          });
+}
+
+//==============================================================================
 void SiampleEditor::changeListenerCallback (juce::ChangeBroadcaster*)
 {
     const auto current = proc.getSample();
@@ -493,6 +838,7 @@ void SiampleEditor::changeListenerCallback (juce::ChangeBroadcaster*)
         waveform.sampleChanged();
     }
 
+    lastMask = ~proc.getActiveMask();   // force la mise à jour des pads allumés
     refresh();
 }
 
@@ -508,16 +854,14 @@ void SiampleEditor::timerCallback()
     }
 
     waveform.setPlayhead (mask != 0 ? proc.getPlayheadPosition() : -1);
+    timeline.setPlayhead (proc.isTimelinePlaying() ? proc.getTimelinePosition() : -1.0);
+    browser.timerTick();
 
-    const double host = proc.getHostBpm();
-    const bool rendering = proc.isRendering();
+    if (std::abs (proc.getHostBpm() - shownHostBpm) > 0.005 || proc.isRendering() != shownRendering
+        || proc.isTempoFromHost() != shownTempoFromHost)
+        updateStatus();
 
-    if (std::abs (host - shownHostBpm) > 0.005 || rendering != shownRendering)
-        updateHostLabel();
-
-    sequenceLane.setPlayingStep (proc.isSequencePlaying() ? proc.getSequencePlayingStep() : -1);
-
-    if (proc.isPatternPlaying() != shownPlaying || proc.isSequencePlaying() != shownSequencePlaying)
+    if (proc.isTimelinePlaying() != shownPlaying)
         refresh();
 }
 
@@ -526,28 +870,50 @@ void SiampleEditor::selectionChanged()
     pads.showSlice (proc.getSelectedSlice());
     slicePanel.refresh();
     waveform.repaint();
-
-    if (proc.hasSample() && proc.getNumSlices() > 0)
-        sequenceAddButton.setButtonText ("+ Tranche " + juce::String (proc.getSelectedSlice() + 1));
 }
 
-void SiampleEditor::updateHostLabel()
+void SiampleEditor::updateStatus()
 {
     shownHostBpm = proc.getHostBpm();
     shownRendering = proc.isRendering();
+    shownTempoFromHost = proc.isTempoFromHost();
 
-    juce::String text = "Projet : " + juce::String (shownHostBpm, 1) + " BPM";
+    if (! projectLabel.isBeingEdited())
+        projectLabel.setText (juce::String (shownHostBpm, 1), juce::dontSendNotification);
 
-    if (proc.isSyncEnabled() && proc.hasSample())
-        text << fr ("  ·  ") << (shownRendering ? fr ("calcul en cours…") : fr ("calé"));
+    projectLabel.setEditable (! shownTempoFromHost);
+    projectLabel.setTooltip (shownTempoFromHost ? fr ("Tempo du projet, donné par le DAW")
+                                                : fr ("Tempo du projet. Le DAW ne l'a pas encore donné : clique pour le régler à la main."));
 
-    hostLabel.setText (text, juce::dontSendNotification);
+    syncButton.setButtonText (proc.isSyncEnabled() && proc.hasSample() && proc.deck().isRendering() ? fr ("Sync…") : juce::String ("Sync"));
+
+    // Les durées affichées dépendent du tempo du projet
+    timeline.repaint();
 }
 
 void SiampleEditor::refresh()
 {
     const bool hasSample = proc.hasSample();
     const auto mode = proc.getSliceMode();
+    const int count = proc.getNumSlices();
+    const int active = proc.getActiveDeck();
+    auto& deck = proc.deck();
+
+    undoButton.setEnabled (proc.canUndo());
+    redoButton.setEnabled (proc.canRedo());
+    velocityButton.setToggleState (proc.isFullVelocity(), juce::dontSendNotification);
+    repeatBox.setSelectedId (proc.getNoteRepeat() == 0 ? 1 : proc.getNoteRepeat(), juce::dontSendNotification);
+
+    // Onglets des samples
+    for (int i = 0; i < numDecks; ++i)
+    {
+        auto& b = deckButtons[(size_t) i];
+        const auto& d = proc.getDeck (i);
+        b.setToggleState (i == active, juce::dontSendNotification);
+        b.setColour (juce::TextButton::textColourOffId, d.hasSample() ? theme::text : theme::textDim.withAlpha (0.6f));
+        b.setTooltip (d.hasSample() ? fr ("Sample ") + deckName (i) + " : " + d.getFileName()
+                                    : fr ("Sample ") + deckName (i) + fr (" : vide. Clique pour l'afficher, puis charge un fichier."));
+    }
 
     // Nom du fichier ou message d'erreur
     if (errorMessage.isNotEmpty())
@@ -558,10 +924,7 @@ void SiampleEditor::refresh()
     else if (hasSample)
     {
         const double seconds = (double) proc.getSampleLength() / proc.getSourceSampleRate();
-        const int minutes = (int) (seconds / 60.0);
-        const auto duration = minutes > 0 ? juce::String (minutes) + " min " + juce::String ((int) seconds % 60) + " s"
-                                          : juce::String (seconds, 1) + " s";
-        fileLabel.setText (proc.getFileName() + fr ("  ·  ") + duration, juce::dontSendNotification);
+        fileLabel.setText (proc.getFileName() + fr ("  ·  ") + juce::String (seconds, 1) + " s", juce::dontSendNotification);
         fileLabel.setColour (juce::Label::textColourId, theme::text);
     }
     else if (proc.getMissingFilePath().isNotEmpty())
@@ -571,111 +934,100 @@ void SiampleEditor::refresh()
     }
     else
     {
-        fileLabel.setText (fr ("Aucun sample chargé"), juce::dontSendNotification);
+        fileLabel.setText (fr ("Sample ") + deckName (active) + fr (" vide"), juce::dontSendNotification);
         fileLabel.setColour (juce::Label::textColourId, theme::textDim);
     }
 
     waveform.setEmptyMessage (proc.getMissingFilePath().isNotEmpty()
-                                  ? fr ("Le sample de ce projet est introuvable :\n") + proc.getMissingFilePath()
+                                  ? fr ("Le fichier audio de ce projet est introuvable :\n") + proc.getMissingFilePath()
                                         + fr ("\nRecharge-le pour retrouver ta découpe.")
                                   : juce::String());
 
-    // Barre de découpe
-    transientsButton.setToggleState (mode == SliceMode::transients, juce::dontSendNotification);
-    gridButton.setToggleState (mode == SliceMode::grid, juce::dontSendNotification);
-    manualButton.setToggleState (mode == SliceMode::manual, juce::dontSendNotification);
+    // Tempo et tonalité
+    bpmLabel.setText (hasSample ? juce::String (proc.getSampleBpm(), 1) : juce::String ("-"), juce::dontSendNotification);
+    bpmLabel.setColour (juce::Label::textColourId, proc.isBpmManual() ? theme::accent : theme::text);
+    syncButton.setToggleState (proc.isSyncEnabled(), juce::dontSendNotification);
 
-    sensitivitySlider.setVisible (mode == SliceMode::transients);
-    divisionsBox.setVisible (mode == SliceMode::grid);
-    optionLabel.setVisible (mode != SliceMode::manual);
-    optionLabel.setText (mode == SliceMode::transients ? fr ("Sensibilité") : fr ("Pas"), juce::dontSendNotification);
+    const auto key = deck.getDetectedKey();
+    const int transpose = deck.getTranspose();
+    keyLabel.setText (hasSample && key.isValid() ? keyName (key.root + transpose, key.minor) : juce::String ("-"), juce::dontSendNotification);
+    keyLabel.setColour (juce::Label::textColourId, transpose != 0 ? theme::accent : theme::text);
+    transposeLabel.setText ((transpose > 0 ? "+" : "") + juce::String (transpose) + " st", juce::dontSendNotification);
+    targetKeyBox.setSelectedId (hasSample && key.isValid() && transpose != 0 ? ((key.root + transpose) % 12 + 12) % 12 + 1 : 0,
+                                juce::dontSendNotification);
+
+    for (auto* c : std::initializer_list<juce::Component*> { &bpmLabel, &halfButton, &doubleButton, &autoButton, &syncButton,
+                                                              &transposeDownButton, &transposeUpButton, &transposeLabel })
+        c->setEnabled (hasSample);
+
+    targetKeyBox.setEnabled (hasSample && key.isValid());
+    autoButton.setEnabled (hasSample && proc.isBpmManual());
+
+    // Découpe
+    (mode == SliceMode::transients ? transientsButton : mode == SliceMode::grid ? gridButton : manualButton)
+        .setToggleState (true, juce::dontSendNotification);
 
     sensitivitySlider.setValue (proc.getSensitivity(), juce::dontSendNotification);
     divisionsBox.setSelectedId (divisionsToId (proc.getDivisions()), juce::dontSendNotification);
 
-    if (divisionsBox.getSelectedId() == 0)
-        divisionsBox.setSelectedId (16, juce::dontSendNotification);
-
-    const int count = proc.getNumSlices();
-    countLabel.setText (hasSample ? juce::String (count) + (count > 1 ? " tranches" : " tranche") : juce::String(),
-                        juce::dontSendNotification);
-
-    // Barre de tempo et de jeu
-    bpmLabel.setText (hasSample ? juce::String (proc.getSampleBpm(), 1) : juce::String ("-"), juce::dontSendNotification);
-    bpmLabel.setColour (juce::Label::textColourId, proc.isBpmManual() ? theme::accent : theme::text);
-    autoButton.setEnabled (hasSample && proc.isBpmManual());
-    syncButton.setToggleState (proc.isSyncEnabled(), juce::dontSendNotification);
-    padsButton.setToggleState (proc.getPlayMode() == PlayMode::pads, juce::dontSendNotification);
-    keysButton.setToggleState (proc.getPlayMode() == PlayMode::keys, juce::dontSendNotification);
-    monoButton.setToggleState (proc.isMono(), juce::dontSendNotification);
-    updateHostLabel();
-
-    // Barre de boucle
-    shownPlaying = proc.isPatternPlaying();
-    listenButton.setToggleState (shownPlaying, juce::dontSendNotification);
-    listenButton.setButtonText (shownPlaying ? juce::String ("Stop") : fr ("Écouter"));
-    originalButton.setEnabled (hasSample && proc.isPatternFlipped());
-    flipButton.setEnabled (hasSample && count > 1);
-
-    if (! hasSample)
-        loopInfoLabel.setText ({}, juce::dontSendNotification);
-    else if (proc.isPatternFlipped())
-        loopInfoLabel.setText (proc.isMono() ? fr ("Ordre réarrangé")
-                                             : fr ("Ordre réarrangé. Active Mono pour que les tranches ne se chevauchent pas."),
-                               juce::dontSendNotification);
-    else
-        loopInfoLabel.setText (fr ("Ordre d'origine"), juce::dontSendNotification);
-
-    // Piste
-    const int steps = proc.getSequenceLength();
-    shownSequencePlaying = proc.isSequencePlaying();
-    sequenceListenButton.setToggleState (shownSequencePlaying, juce::dontSendNotification);
-    sequenceListenButton.setButtonText (shownSequencePlaying ? juce::String ("Stop") : fr ("Écouter"));
-    sequenceAddButton.setButtonText (hasSample && count > 0 ? "+ Tranche " + juce::String (proc.getSelectedSlice() + 1)
-                                                            : juce::String ("+ Tranche"));
-    sequenceAddButton.setEnabled (hasSample && count > 0 && steps < maxSequenceSteps);
-
-    for (auto* c : std::initializer_list<juce::Component*> { &sequenceListenButton, &sequenceClearButton,
-                                                              &sequenceAudioDrag, &sequenceMidiDrag })
-        c->setEnabled (hasSample && steps > 0);
-
-    if (! hasSample || steps == 0)
+    if (! montageVisible)
     {
-        sequenceInfoLabel.setText ({}, juce::dontSendNotification);
+        sensitivitySlider.setVisible (mode == SliceMode::transients);
+        divisionsBox.setVisible (mode == SliceMode::grid);
+        optionLabel.setText (mode == SliceMode::transients ? fr ("Sensibilité") : mode == SliceMode::grid ? juce::String ("Pas") : juce::String(),
+                             juce::dontSendNotification);
     }
     else
     {
-        const double seconds = proc.getSequenceSeconds();
-        sequenceInfoLabel.setText (juce::String (steps) + (steps > 1 ? " tranches" : " tranche") + fr ("  ·  ")
-                                       + juce::String (seconds, seconds < 10.0 ? 2 : 1) + " s",
+        sensitivitySlider.setVisible (false);
+        divisionsBox.setVisible (false);
+    }
+
+    countLabel.setText (hasSample ? juce::String (count) + (count > 1 ? " tranches" : " tranche") : juce::String(), juce::dontSendNotification);
+    (proc.getPlayMode() == PlayMode::keys ? keysButton : padsButton).setToggleState (true, juce::dontSendNotification);
+    monoButton.setToggleState (proc.isMono(), juce::dontSendNotification);
+
+    for (auto* c : std::initializer_list<juce::Component*> { &transientsButton, &gridButton, &manualButton, &sensitivitySlider, &divisionsBox,
+                                                              &normaliseButton, &padsButton, &keysButton, &monoButton })
+        c->setEnabled (hasSample);
+
+    // Montage
+    const int clips = proc.getNumClips();
+    shownPlaying = proc.isTimelinePlaying();
+    listenButton.setToggleState (shownPlaying, juce::dontSendNotification);
+    listenButton.setButtonText (shownPlaying ? juce::String ("Stop") : fr ("Écouter"));
+    barsBox.setSelectedId (proc.getTimelineBars(), juce::dontSendNotification);
+    snapBox.setSelectedId (proc.getSnap() == 0 ? 1 : proc.getSnap(), juce::dontSendNotification);
+
+    for (int i = 0; i < numVariants; ++i)
+        variantButtons[(size_t) i].setToggleState (i == proc.getVariant(), juce::dontSendNotification);
+
+    orderButton.setEnabled (hasSample && count > 0);
+    flipButton.setEnabled (hasSample && count > 1);
+    clearButton.setEnabled (clips > 0);
+    listenButton.setEnabled (clips > 0 || shownPlaying);
+    timelineAudioDrag.setEnabled (clips > 0);
+    timelineMidiDrag.setEnabled (clips > 0);
+
+    {
+        const double seconds = proc.getTimelineBeats() * 60.0 / proc.getHostBpm();
+        timelineInfoLabel.setText (clips == 0 ? juce::String()
+                                              : juce::String (clips) + (clips > 1 ? " blocs" : " bloc") + fr ("  ·  ")
+                                                    + juce::String (seconds, 1) + " s",
                                    juce::dontSendNotification);
     }
 
-    sequenceLane.repaint();
+    hintLabel.setText (montageVisible
+                           ? fr ("Glisser un pad : poser un bloc  ·  Glisser un bloc : le déplacer  ·  Bord droit : sa durée  ·  "
+                                 "Alt + glisser : dupliquer  ·  Clic droit : retirer  ·  Lettre d'une ligne : afficher ce sample")
+                           : hasSample ? fr ("Clic : écouter  ·  Double-clic : ajouter un point  ·  Glisser un point : le déplacer  ·  "
+                                             "Clic droit sur un point : le supprimer  ·  Molette : zoom  ·  Bandeau du haut : zone à découper")
+                                       : juce::String(),
+                       juce::dontSendNotification);
 
-    for (auto* c : std::initializer_list<juce::Component*> { &transientsButton, &gridButton, &manualButton, &sensitivitySlider,
-                                                              &divisionsBox, &bpmLabel, &halfButton, &doubleButton, &syncButton,
-                                                              &listenButton, &midiDrag })
-        c->setEnabled (hasSample);
-
-    // Aide contextuelle
-    if (! hasSample)
-    {
-        hintLabel.setText ({}, juce::dontSendNotification);
-    }
-    else
-    {
-        const double seconds = (double) proc.getSampleLength() / proc.getSourceSampleRate();
-        const bool fullRegion = proc.getRegionStart() == 0 && proc.getRegionEnd() == proc.getSampleLength();
-
-        hintLabel.setText (seconds > 30.0 && fullRegion
-                               ? fr ("Fichier long : glisse dans le bandeau turquoise du haut pour choisir la zone à découper. Molette : zoom.")
-                               : fr ("Clic : écouter  ·  Double-clic : ajouter un point  ·  Glisser un point : le déplacer  ·  Clic droit sur un point : le supprimer  ·  Molette : zoom  ·  Bandeau du haut : zone à découper"),
-                           juce::dontSendNotification);
-    }
-
+    updateStatus();
     pads.showSlice (proc.getSelectedSlice());
     slicePanel.refresh();
     waveform.repaint();
-    midiDrag.repaint();
+    timeline.clipsChanged();
 }

@@ -7,7 +7,7 @@ set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "Architectures macOS")
 # Windows : runtime C++ intégré au plugin (rien à installer chez l'utilisateur)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
-project(Siample VERSION 0.4.0 LANGUAGES C CXX)
+project(Siample VERSION 0.5.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -53,9 +53,18 @@ juce_add_plugin(Siample
     NEEDS_WEB_BROWSER FALSE
     NEEDS_CURL FALSE)
 
+# Polices de l'interface (Inter et Space Grotesk, licence OFL), embarquées dans le plugin
+juce_add_binary_data(SiampleFonts SOURCES
+    Fonts/Inter-Regular.ttf
+    Fonts/Inter-SemiBold.ttf
+    Fonts/SpaceGrotesk-Bold.ttf)
+set_target_properties(SiampleFonts PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
 set(SIAMPLE_SOURCES
     Source/PluginProcessor.cpp
+    Source/Deck.cpp
     Source/PluginEditor.cpp
+    Source/ui/Theme.cpp
     Source/Stretcher.cpp)
 
 target_sources(Siample PRIVATE ${SIAMPLE_SOURCES})
@@ -75,7 +84,9 @@ endif()
 target_link_libraries(Siample
     PRIVATE
         juce::juce_audio_utils
+        juce::juce_dsp
         signalsmith-stretch
+        SiampleFonts
     PUBLIC
         juce::juce_recommended_config_flags
         juce::juce_recommended_lto_flags
@@ -95,6 +106,8 @@ if(SIAMPLE_BUILD_TESTS)
         SIAMPLE_TESTS=1)
     target_link_libraries(SiampleTests PRIVATE
         juce::juce_audio_utils
+        juce::juce_dsp
         signalsmith-stretch
+        SiampleFonts
         juce::juce_recommended_config_flags)
 endif()

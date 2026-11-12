@@ -229,10 +229,20 @@ static juce::AudioBuffer<float> makeTone (double sr, double frequency, double se
     return buffer;
 }
 
-static void saveSnapshot (SiampleProcessor& proc, const juce::File& out, int width, int height)
+static void saveSnapshot (SiampleProcessor& proc, const juce::File& out, int width, int height, bool withBrowser = false)
 {
     std::unique_ptr<juce::AudioProcessorEditor> editor (proc.createEditorAndMakeActive());
     editor->setSize (width, height);
+
+    if (auto* e = dynamic_cast<SiampleEditor*> (editor.get()))
+    {
+        if (withBrowser)
+            e->showBrowser (true);
+
+        // l'horloge de l'interface ne tourne pas ici : on fait un tour a la main pour la tete de lecture
+        e->timerCallbackForTests();
+    }
+
     auto image = editor->createComponentSnapshot (editor->getLocalBounds(), true, 1.0f);
 
     out.deleteFile();
@@ -832,106 +842,11 @@ int main (int argc, char* argv[])
     }
 
     //==============================================================================
-    std::cout << "Boucle : Flip, ecoute, MIDI" << std::endl;
+    std::cout << "Export audio d'une tranche, son" << std::endl;
+    const double hostSr = 48000.0;
+    // Quatre notes d'une demi-seconde : 220, 330, 440 et 550 Hz
+    juce::AudioBuffer<float> tones (2, (int) (sr * 2.0));
     {
-        const double hostSr = 48000.0;
-        SiampleProcessor t;
-        t.prepareToPlay (hostSr, 512);
-        t.loadFile (file);
-        t.setSliceMode (SliceMode::grid);
-        t.setDivisions (8);
-
-        // MIDI de la boucle d'origine
-        auto readNotes = [] (const juce::File& midiFile)
-        {
-            std::vector<std::pair<int, int>> notes;   // (tick, note)
-            juce::FileInputStream stream (midiFile);
-            juce::MidiFile midi;
-
-            if (stream.openedOk() && midi.readFrom (stream) && midi.getNumTracks() > 0)
-                for (const auto* holder : *midi.getTrack (0))
-                    if (holder->message.isNoteOn())
-                        notes.push_back ({ (int) holder->message.getTimeStamp(), holder->message.getNoteNumber() });
-
-            return notes;
-        };
-
-        auto midiFile = t.createPatternMidiFile();
-        auto notes = readNotes (midiFile);
-        bool ordered = notes.size() == 8;
-        for (size_t i = 0; ordered && i < notes.size(); ++i)
-            ordered = notes[i].first == (int) i * 480 && notes[i].second == 36 + (int) i;
-        check (ordered, "fichier MIDI : 8 notes, une par demi-temps, dans l'ordre (" + midiFile.getFileName() + ")");
-
-        // Flip
-        t.flipPattern();
-        bool valid = t.isPatternFlipped(), changed = false;
-        for (int i = 0; i < 8; ++i)
-        {
-            valid = valid && t.getPatternSlice (i) >= 0 && t.getPatternSlice (i) < 8;
-            changed = changed || t.getPatternSlice (i) != i;
-        }
-        check (valid && changed, "Flip : nouvel ordre valide et different de l'original");
-
-        notes = readNotes (t.createPatternMidiFile());
-        bool follows = notes.size() == 8;
-        for (size_t i = 0; follows && i < notes.size(); ++i)
-            follows = notes[i].first == (int) i * 480 && notes[i].second == 36 + t.getPatternSlice ((int) i);
-        check (follows, "fichier MIDI apres Flip : memes instants, notes rearrangees");
-
-        // Ecoute interne : chaque pas déclenche la tranche prévue, au bon moment
-        t.setPatternPlaying (true);
-        const int blocksPerStep = (int) (0.25 * hostSr / 512.0);   // 23,4 blocs par pas
-        bool sequenceOk = true;
-        juce::AudioBuffer<float> buffer (2, 512);
-
-        for (int step = 0; step < 16 && sequenceOk; ++step)
-        {
-            // on se place au milieu du pas
-            const int targetBlock = (int) (((double) step + 0.5) * 0.25 * hostSr / 512.0);
-            static int done = 0;
-            if (step == 0) done = 0;
-
-            for (; done < targetBlock; ++done)
-            {
-                juce::MidiBuffer midi;
-                t.processBlock (buffer, midi);
-            }
-
-            sequenceOk = t.getActiveMask() == (juce::uint64) 1 << t.getPatternSlice (step % 8);
-        }
-
-        check (sequenceOk, "ecoute : les tranches s'enchainent dans l'ordre du Flip, et la boucle reprend au debut");
-        juce::ignoreUnused (blocksPerStep);
-
-        t.setPatternPlaying (false);
-        capture (t, 3);
-        check (t.getActiveMask() == 0, "ecoute : Stop coupe le son");
-
-        t.resetPattern();
-        check (! t.isPatternFlipped() && t.getPatternSlice (5) == 5, "Original : retour a l'ordre d'origine");
-
-        // Le Flip survit a la sauvegarde, et disparait si la decoupe change
-        t.flipPattern();
-        juce::MemoryBlock state;
-        t.getStateInformation (state);
-        SiampleProcessor other;
-        other.setStateInformation (state.getData(), (int) state.getSize());
-        bool samePattern = other.isPatternFlipped();
-        for (int i = 0; i < 8; ++i)
-            samePattern = samePattern && other.getPatternSlice (i) == t.getPatternSlice (i);
-        check (samePattern, "Flip restaure apres sauvegarde");
-
-        t.setDivisions (4);
-        check (! t.isPatternFlipped(), "nouvelle decoupe : le Flip est remis a zero");
-    }
-
-    //==============================================================================
-    std::cout << "Piste et export audio" << std::endl;
-    {
-        const double hostSr = 48000.0;
-        // Quatre notes d'une demi-seconde : 220, 330, 440 et 550 Hz
-        juce::AudioBuffer<float> tones (2, (int) (sr * 2.0));
         tones.clear();
         const double frequencies[] = { 220.0, 330.0, 440.0, 550.0 };
 
@@ -942,8 +857,44 @@ int main (int argc, char* argv[])
             tones.setSample (0, i, v);
             tones.setSample (1, i, v);
         }
+    }
+    const auto tonesFile = writeWav (tones, sr, "siample_tones.wav");
+    const auto highFile  = writeWav (makeTone (sr, 880.0, 1.0), sr, "siample_880.wav");
+    const auto steadyFile = writeWav (makeTone (sr, 440.0, 2.0), sr, "siample_440.wav");
 
-        auto tonesFile = writeWav (tones, sr, "siample_tones.wav");
+    auto readWav = [] (const juce::File& f, double& rate)
+    {
+        std::vector<float> samples;
+        juce::AudioFormatManager manager;
+        manager.registerBasicFormats();
+        std::unique_ptr<juce::AudioFormatReader> reader (manager.createReaderFor (f));
+
+        if (reader != nullptr)
+        {
+            juce::AudioBuffer<float> b ((int) reader->numChannels, (int) reader->lengthInSamples);
+            reader->read (&b, 0, b.getNumSamples(), 0, true, true);
+            samples.assign (b.getReadPointer (0), b.getReadPointer (0) + b.getNumSamples());
+            rate = reader->sampleRate;
+        }
+
+        return samples;
+    };
+
+    auto part = [] (const std::vector<float>& signal, double rate, double from, double to)
+    {
+        const size_t a = (size_t) juce::jlimit (0.0, (double) signal.size(), from * rate);
+        const size_t b = (size_t) juce::jlimit ((double) a, (double) signal.size(), to * rate);
+        return std::vector<float> (signal.begin() + (std::ptrdiff_t) a, signal.begin() + (std::ptrdiff_t) b);
+    };
+
+    auto channelNote = [] (int channel, int note, bool on, float velocity = 0.8f)
+    {
+        juce::MidiBuffer midi;
+        midi.addEvent (on ? juce::MidiMessage::noteOn (channel, note, velocity) : juce::MidiMessage::noteOff (channel, note), 0);
+        return midi;
+    };
+
+    {
         TestPlayHead head;
         SiampleProcessor t;
         t.setPlayHead (&head);
@@ -954,32 +905,14 @@ int main (int argc, char* argv[])
         t.setSampleBpm (120.0);
         check (t.getNumSlices() == 4, "4 tranches d'une demi-seconde");
 
-        auto readWav = [&t] (const juce::File& f, double& rate)
-        {
-            std::vector<float> samples;
-            std::unique_ptr<juce::AudioFormatReader> reader (t.getFormatManager().createReaderFor (f));
-
-            if (reader != nullptr)
-            {
-                juce::AudioBuffer<float> b ((int) reader->numChannels, (int) reader->lengthInSamples);
-                reader->read (&b, 0, b.getNumSamples(), 0, true, true);
-                samples.assign (b.getReadPointer (0), b.getReadPointer (0) + b.getNumSamples());
-                rate = reader->sampleRate;
-            }
-
-            return samples;
-        };
-
-        // Export d'une tranche
         double rate = 0.0;
         auto sliceFile = t.createSliceAudioFile (2);
         auto sliceAudio = readWav (sliceFile, rate);
         check (sliceFile.existsAsFile() && sliceFile.getFileName().contains ("tranche 3"), "export d'une tranche : fichier WAV cree (" + sliceFile.getFileName() + ")");
         check (std::abs ((double) sliceAudio.size() / rate - 0.5) < 0.002 && rate == sr, "tranche exportee : 0,50 s a la frequence du sample");
-        check (std::abs (measureFrequency (sliceAudio, rate, 0.05, 0.45) - 440.0) < 4.0, "tranche exportee : 440 Hz -> " + juce::String (measureFrequency (sliceAudio, rate, 0.05, 0.45), 1));
+        check (std::abs (measureFrequency (sliceAudio, rate, 0.05, 0.45) - 440.0) < 4.0, "tranche exportee : 440 Hz");
         check (! t.createSliceAudioFile (9).existsAsFile(), "tranche inexistante : pas de fichier");
 
-        // Les réglages de la tranche sont dans l'export
         auto params = SliceParams();
         params.pitch = 12;
         params.loop = true;
@@ -989,96 +922,432 @@ int main (int argc, char* argv[])
         check (std::abs (measureFrequency (sliceAudio, rate, 0.03, 0.22) - 880.0) < 8.0, "tranche une octave plus haut : 880 Hz");
         t.setSliceParams (2, SliceParams());
 
-        // Montage de la piste : 1, 1, 3
-        check (! t.insertSequenceStep (7), "piste : une tranche inexistante est refusee");
-        check (t.insertSequenceStep (0) && t.insertSequenceStep (2) && t.insertSequenceStep (0, 0), "piste : ajout a la fin et insertion au debut");
-        check (t.getSequenceLength() == 3 && t.getSequenceStep (0) == 0 && t.getSequenceStep (1) == 0 && t.getSequenceStep (2) == 2, "piste : 1, 1, 3");
-        check (std::abs (t.getSequenceSeconds() - 1.5) < 0.001, "piste : 1,50 s au total");
+        const auto all = t.createAllSliceAudioFiles();
+        check (all.size() == 4 && all[0].getFileName().endsWith ("01.wav") && all[3].existsAsFile()
+                   && all[0].getParentDirectory() == all[3].getParentDirectory(), "export de toutes les tranches : 4 fichiers numerotes dans un dossier");
 
-        t.moveSequenceStep (2, 0);
-        check (t.getSequenceStep (0) == 2 && t.getSequenceStep (1) == 0 && t.getSequenceStep (2) == 0, "piste : deplacement d'un bloc -> 3, 1, 1");
-        t.moveSequenceStep (0, 2);
-        t.insertSequenceStep (3, 1);
-        t.removeSequenceStep (1);
-        check (t.getSequenceLength() == 3 && t.getSequenceStep (2) == 2, "piste : retrait d'un bloc -> retour a 1, 1, 3");
+        // Transposition du sample entier
+        t.deck().setTranspose (12);
+        auto out = capture (t, 30, noteOn (36));
+        check (std::abs (measureFrequency (out, hostSr, 0.03, 0.2) - 440.0) < 5.0 && std::abs (audibleSeconds (out, hostSr) - 0.25) < 0.02,
+               "transposition du sample +12 : une octave plus haut (et deux fois plus court sans Sync)");
+        t.deck().setTranspose (0);
 
-        // Écoute : 220 Hz deux fois puis 440 Hz, et ça reboucle
-        t.setPatternPlaying (true);
-        t.setSequencePlaying (true);
-        check (! t.isPatternPlaying() && t.isSequencePlaying(), "ecouter la piste arrete l'ecoute de la boucle");
-        auto out = capture (t, (int) (2.0 * hostSr / 512.0));
+        // Vélocité fixe
+        const float soft = rms (part (capture (t, 20, channelNote (1, 36, true, 0.2f)), hostSr, 0.05, 0.2));
+        capture (t, 40);
+        t.setFullVelocity (true);
+        const float full = rms (part (capture (t, 20, channelNote (1, 36, true, 0.2f)), hostSr, 0.05, 0.2));
+        capture (t, 40);
+        t.setFullVelocity (false);
+        check (soft < 0.2f && std::abs (full - 0.3536f) < 0.02f, "velocite fixe : une note douce joue a fond -> " + juce::String (soft, 3) + " puis " + juce::String (full, 3));
+
+        // Répétition des notes tenues : croches a 120 BPM = toutes les 0,25 s
+        t.setNoteRepeat (8);
+        out = capture (t, (int) (1.0 * hostSr / 512.0), noteOn (36));
+        auto tail = capture (t, 80, noteOff (36));
+        out.insert (out.end(), tail.begin(), tail.end());
+        check (std::abs (audibleSeconds (out, hostSr) - 1.25) < 0.06, "note repeat : la tranche est relancee tant que la note est tenue -> "
+                                                                        + juce::String (audibleSeconds (out, hostSr), 2) + " s");
+        t.setNoteRepeat (0);
+        out = capture (t, (int) (1.0 * hostSr / 512.0), noteOn (36));
+        check (std::abs (audibleSeconds (out, hostSr) - 0.5) < 0.02, "sans note repeat : la tranche ne joue qu'une fois");
+        capture (t, 10, noteOff (36));
+
+        // Résonance et drive
+        const auto midFile = writeWav (makeTone (sr, 1265.0, 1.0), sr, "siample_1265.wav");
+        t.getDeck (1).loadFile (midFile);
+        t.setActiveDeck (1);
+        params = SliceParams();
+        params.filter = -0.5f;   // passe-bas vers 1265 Hz
+        t.setSliceParams (0, params);
+        const float plain = rms (part (capture (t, 30, noteOn (36)), hostSr, 0.1, 0.25));
+        capture (t, 120);
+        params.resonance = 1.0f;
+        t.setSliceParams (0, params);
+        const float resonant = rms (part (capture (t, 30, noteOn (36)), hostSr, 0.1, 0.25));
+        capture (t, 120);
+        check (resonant > plain * 3.0f, "resonance : la frequence de coupure est accentuee (x" + juce::String (resonant / plain, 1) + ")");
+
+        params = SliceParams();
+        params.drive = 1.0f;
+        t.setSliceParams (0, params);
+        out = part (capture (t, 30, noteOn (36)), hostSr, 0.1, 0.25);
+        float peak = 0.0f;
+        int flat = 0;
+        for (float v : out)
+        {
+            peak = juce::jmax (peak, std::abs (v));
+            flat += std::abs (v) > 0.0f && std::abs (std::abs (v) - peak) < 0.02f ? 1 : 0;
+        }
+        check (peak > 0.05f && peak < 1.2f && flat > (int) out.size() / 3, "drive a fond : onde ecretee, niveau maitrise (crete " + juce::String (peak, 2) + ")");
+        capture (t, 120);
+        t.getDeck (1).unload();
+        t.setActiveDeck (0);
+        check (! t.getDeck (1).hasSample(), "vider un sample");
+
+        // Fondu de boucle : plus de creux au point de bouclage
+        t.loadFile (steadyFile);
+        t.setSliceMode (SliceMode::grid);
+        t.setDivisions (4);
+
+        auto quietest = [&] (float fadeMs)
+        {
+            auto p = SliceParams();
+            p.loop = true;
+            p.loopFade = fadeMs;
+            t.setSliceParams (1, p);
+            auto held = capture (t, (int) (1.4 * hostSr / 512.0), noteOn (37));
+            capture (t, 20, noteOff (37));
+            // Le plus petit « maximum sur une demi-milliseconde » : il tombe pres de zero s'il y a un trou dans le son
+            float lowest = 10.0f;
+            const int window = 24;
+
+            for (int start = (int) (0.1 * hostSr); start + window < (int) (1.3 * hostSr); start += 6)
+            {
+                float highest = 0.0f;
+
+                for (int i = 0; i < window; ++i)
+                    highest = juce::jmax (highest, std::abs (held[(size_t) (start + i)]));
+
+                lowest = juce::jmin (lowest, highest);
+            }
+
+            return lowest;
+        };
+
+        const float dip = quietest (0.0f);
+        const float smooth = quietest (40.0f);
+        check (dip < 0.16f && smooth > 0.22f, "fondu de boucle : le creux au point de bouclage disparait (" + juce::String (dip, 2) + " -> " + juce::String (smooth, 2) + ")");
+
+        head.bpm = 60.0;
+        capture (t, 2);
+        t.setSyncEnabled (true);
+        t.waitForRendering (20000);
+        const float stretched = quietest (40.0f);
+        check (stretched > 0.12f, "fondu de boucle avec Sync : son continu -> " + juce::String (stretched, 2));
+        t.setSyncEnabled (false);
+        head.bpm = 120.0;
+        capture (t, 2);
+
+        // Niveler : une tranche a 0,5 et une a 0,1 de crete
+        juce::AudioBuffer<float> uneven (2, (int) sr);
+        for (int i = 0; i < uneven.getNumSamples(); ++i)
+        {
+            const float v = (float) ((i < uneven.getNumSamples() / 2 ? 0.5 : 0.1) * std::sin (2.0 * juce::MathConstants<double>::pi * 300.0 * i / sr));
+            uneven.setSample (0, i, v);
+            uneven.setSample (1, i, v);
+        }
+        t.loadFile (writeWav (uneven, sr, "siample_uneven.wav"));
+        t.setSliceMode (SliceMode::grid);
+        t.setDivisions (2);
+        t.deck().normaliseSlices();
+        check (std::abs (t.getSlice (0).params.gainDb - 5.0f) < 0.2f && std::abs (t.getSlice (1).params.gainDb - 12.0f) < 0.01f,
+               "niveler : +5 dB sur la tranche forte, +12 dB (le maximum) sur la faible");
+
+        // Pré-écoute du navigateur
+        check (t.startPreview (tonesFile).isEmpty() && t.isPreviewPlaying(), "pre-ecoute : demarre");
+        out = capture (t, 30);
+        check (std::abs (measureFrequency (out, hostSr, 0.05, 0.3) - 220.0) < 3.0, "pre-ecoute : on entend le fichier sans rien charger");
+        t.stopPreview();
+        out = capture (t, 10);
+        check (rms (out) < 1.0e-5f && ! t.isPreviewPlaying(), "pre-ecoute : Stop");
+        check (t.startPreview (juce::File ("/nulle/part.wav")).isNotEmpty(), "pre-ecoute d'un fichier absent : message d'erreur");
+        t.setPlayHead (nullptr);
+    }
+
+    //==============================================================================
+    std::cout << "Tonalite" << std::endl;
+    {
+        // Une suite de notes en do majeur, puis en la mineur
+        auto makeScale = [sr] (std::initializer_list<int> notes)
+        {
+            const int each = (int) (sr * 0.3);
+            juce::AudioBuffer<float> buffer (2, each * (int) notes.size());
+            int index = 0;
+
+            for (int note : notes)
+            {
+                const double f = 440.0 * std::pow (2.0, (note - 69) / 12.0);
+
+                for (int i = 0; i < each; ++i)
+                {
+                    const double time = i / sr;
+                    const float v = (float) (0.4 * std::exp (-time * 4.0) * (std::sin (2.0 * juce::MathConstants<double>::pi * f * time)
+                                                                            + 0.3 * std::sin (4.0 * juce::MathConstants<double>::pi * f * time)));
+                    buffer.setSample (0, index * each + i, v);
+                    buffer.setSample (1, index * each + i, v);
+                }
+
+                ++index;
+            }
+
+            return buffer;
+        };
+
+        SiampleProcessor t;
+        t.prepareToPlay (48000.0, 512);
+        t.loadFile (writeWav (makeScale ({ 60, 64, 67, 72, 67, 64, 60, 62, 64, 65, 67, 69, 71, 72, 67, 60 }), sr, "siample_do_majeur.wav"));
+        auto key = t.deck().getDetectedKey();
+        check (key.isValid() && key.root == 0 && ! key.minor, "do majeur reconnu -> note " + juce::String (key.root) + (key.minor ? " mineur" : " majeur"));
+
+        t.loadFile (writeWav (makeScale ({ 57, 60, 64, 69, 64, 60, 57, 59, 60, 62, 64, 65, 68, 69, 64, 57 }), sr, "siample_la_mineur.wav"));
+        key = t.deck().getDetectedKey();
+        check (key.isValid() && key.root == 9 && key.minor, "la mineur reconnu -> note " + juce::String (key.root) + (key.minor ? " mineur" : " majeur"));
+
+        juce::AudioBuffer<float> silence (2, (int) sr);
+        silence.clear();
+        t.loadFile (writeWav (silence, sr, "siample_silence.wav"));
+        check (! t.deck().getDetectedKey().isValid(), "silence : pas de tonalite annoncee");
+    }
+
+    //==============================================================================
+    std::cout << "Plusieurs samples et montage" << std::endl;
+    {
+        TestPlayHead head;
+        SiampleProcessor t;
+        t.setPlayHead (&head);
+        t.prepareToPlay (hostSr, 512);
+        capture (t, 1);
+        check (t.isTempoFromHost(), "le tempo vient du DAW quand il le donne");
+
+        t.loadFile (tonesFile);
+        t.setSliceMode (SliceMode::grid);
+        t.setDivisions (4);
+        t.setSampleBpm (120.0);
+
+        // Un deuxieme sample, sans toucher au premier
+        check (t.getDeck (1).loadFile (highFile).isEmpty(), "chargement d'un deuxieme sample (B)");
+        t.getDeck (1).setSliceMode (SliceMode::grid);
+        t.getDeck (1).setDivisions (2);
+        check (t.getNumSlices() == 4 && t.getDeck (1).getNumSlices() == 2 && t.getFileName() == tonesFile.getFileName(),
+               "les deux samples gardent chacun leur decoupe");
+
+        // Canaux MIDI : le canal 1 joue le sample affiche, les canaux 2 a 5 un sample precis
+        auto out = capture (t, 20, channelNote (1, 36, true));
+        check (std::abs (measureFrequency (out, hostSr, 0.05, 0.2) - 220.0) < 3.0 && t.getDeck (0).getActiveMask() == 1 && t.getDeck (1).getActiveMask() == 0,
+               "canal MIDI 1 : le sample affiche (A)");
+        capture (t, 60);
+        out = capture (t, 20, channelNote (3, 36, true));
+        check (std::abs (measureFrequency (out, hostSr, 0.05, 0.2) - 880.0) < 8.0 && t.getDeck (1).getActiveMask() == 1 && t.getDeck (0).getActiveMask() == 0,
+               "canal MIDI 3 : le sample B, meme s'il n'est pas affiche");
+        out = capture (t, 20, channelNote (3, 36, false));
+        check (rms (part (out, hostSr, 0.1, 0.2)) < 1.0e-4f, "canaux 2 a 5 : la note dure ce que dure la note, meme en one-shot");
+        t.setActiveDeck (1);
+        out = capture (t, 20, channelNote (1, 36, true));
+        check (std::abs (measureFrequency (out, hostSr, 0.05, 0.2) - 880.0) < 8.0, "canal MIDI 1 apres changement d'onglet : le sample B");
+        capture (t, 60);
+        t.setActiveDeck (0);
+
+        // Montage : 1, 1, 3 sur la ligne A
+        check (t.addClip (0, 7, 0.0) == -1 && t.addClip (2, 0, 0.0) == -1, "montage : tranche inexistante ou sample vide refuses");
+        check (t.addClip (0, 0, 0.0) == 0 && t.addClip (0, 0, 1.0) == 1 && t.addClip (0, 2, 2.0) == 2, "montage : trois blocs poses");
+        check (std::abs (t.getClip (0).length - 1.0) < 1.0e-6 && std::abs (t.naturalBeats (0, 0) - 1.0) < 1.0e-6,
+               "un bloc prend la duree de sa tranche : 1 temps a 120 BPM");
+        check (t.getTimelineBars() == 2 && std::abs (t.getTimelineBeats() - 8.0) < 1.0e-9, "montage de 2 mesures par defaut");
+
+        t.setTimelinePlaying (true);
+        out = capture (t, (int) (4.5 * hostSr / 512.0));
         check (std::abs (measureFrequency (out, hostSr, 0.05, 0.45) - 220.0) < 3.0
                    && std::abs (measureFrequency (out, hostSr, 0.55, 0.95) - 220.0) < 3.0
-                   && std::abs (measureFrequency (out, hostSr, 1.05, 1.45) - 440.0) < 5.0,
-               "ecoute de la piste : 220, 220, 440 Hz");
-        check (std::abs (measureFrequency (out, hostSr, 1.55, 1.95) - 220.0) < 3.0, "ecoute de la piste : elle reboucle");
-        check (t.getSequencePlayingStep() == 0, "le pas en cours est indique -> " + juce::String (t.getSequencePlayingStep()));
-        t.setSequencePlaying (false);
-        out = capture (t, 40);
-        check (rms (std::vector<float> (out.end() - 2048, out.end())) < 1.0e-4f && t.getSequencePlayingStep() == -1, "Stop : silence");
+                   && std::abs (measureFrequency (out, hostSr, 1.05, 1.45) - 440.0) < 5.0, "ecoute du montage : 220, 220, 440 Hz");
+        check (rms (part (out, hostSr, 1.6, 3.9)) < 1.0e-4f, "ecoute du montage : silence la ou il n'y a pas de bloc");
+        check (std::abs (measureFrequency (out, hostSr, 4.05, 4.45) - 220.0) < 3.0, "ecoute du montage : il reboucle apres 2 mesures");
+        check (t.getTimelinePosition() > 0.9 && t.getTimelinePosition() < 1.1, "position de lecture indiquee -> " + juce::String (t.getTimelinePosition(), 2));
+        t.setTimelinePlaying (false);
+        out = capture (t, 30);
+        check (rms (part (out, hostSr, 0.2, 0.3)) < 1.0e-4f && t.getTimelinePosition() < 0.0, "Stop : silence");
 
-        // Export audio de la piste
-        auto pisteFile = t.createSequenceAudioFile();
-        auto piste = readWav (pisteFile, rate);
-        check (pisteFile.existsAsFile() && std::abs ((double) piste.size() / rate - 1.5) < 0.002, "piste exportee en audio : 1,50 s (" + pisteFile.getFileName() + ")");
-        check (std::abs (measureFrequency (piste, rate, 0.05, 0.45) - 220.0) < 3.0
-                   && std::abs (measureFrequency (piste, rate, 0.55, 0.95) - 220.0) < 3.0
-                   && std::abs (measureFrequency (piste, rate, 1.05, 1.45) - 440.0) < 5.0,
-               "piste exportee : 220, 220, 440 Hz");
+        // Raccourcir, deplacer, superposer
+        t.resizeClip (0, 0.5);
+        t.moveClip (2, 3.0);
+        t.setTimelinePlaying (true);
+        out = capture (t, (int) (2.2 * hostSr / 512.0));
+        t.setTimelinePlaying (false);
+        capture (t, 30);
+        check (rms (part (out, hostSr, 0.05, 0.2)) > 0.2f && rms (part (out, hostSr, 0.32, 0.48)) < 1.0e-3f, "bloc raccourci a un demi-temps : il se tait a 0,25 s");
+        check (std::abs (measureFrequency (out, hostSr, 1.55, 1.95) - 440.0) < 5.0 && rms (part (out, hostSr, 1.05, 1.45)) < 1.0e-3f, "bloc deplace au temps 4");
+        t.resizeClip (0, 1.0);
+        t.moveClip (2, 2.0);
 
-        // Export MIDI de la piste (projet a 120 BPM : une demi-seconde = un temps)
-        std::vector<std::pair<int, int>> notes;
+        const int over = t.addClip (0, 3, 0.5);
+        t.setTimelinePlaying (true);
+        out = capture (t, (int) (0.6 * hostSr / 512.0));
+        t.setTimelinePlaying (false);
+        capture (t, 60);
+        check (std::abs (measureFrequency (out, hostSr, 0.3, 0.45) - 550.0) < 6.0, "meme ligne : un bloc coupe celui qui joue (une tranche a la fois par sample)");
+        t.removeClip (over);
+        check (t.getNumClips() == 3, "retrait d'un bloc");
+
+        // Deux samples superposes
+        t.addClip (1, 0, 0.0);
+        t.setTimelinePlaying (true);
+        capture (t, 10);
+        check (t.getDeck (0).getActiveMask() == 1 && t.getDeck (1).getActiveMask() == 1, "deux lignes : les samples A et B jouent ensemble");
+        t.setTimelinePlaying (false);
+        capture (t, 60);
+
+        // Export audio
+        double rate = 0.0;
+        const auto montageFile = t.createTimelineAudioFile();
+        auto montage = readWav (montageFile, rate);
+        check (montageFile.existsAsFile() && rate == hostSr && std::abs ((double) montage.size() / rate - 4.0) < 0.001,
+               "montage exporte en audio : 4,00 s a la frequence du projet (" + montageFile.getFileName() + ")");
+        check (std::abs (measureFrequency (montage, rate, 0.55, 0.95) - 220.0) < 3.0
+                   && std::abs (measureFrequency (montage, rate, 1.05, 1.45) - 440.0) < 5.0
+                   && rms (part (montage, rate, 1.6, 3.9)) < 1.0e-4f, "montage exporte : meme contenu qu'a l'ecoute");
+        check (rms (part (montage, rate, 0.05, 0.45)) > 0.45f, "montage exporte : les deux samples sont melanges au debut");
+
+        // Export MIDI : un canal par sample
+        std::vector<std::array<int, 3>> notes;   // tick, note, canal
         {
-            juce::FileInputStream stream (t.createSequenceMidiFile());
+            juce::FileInputStream stream (t.createTimelineMidiFile());
             juce::MidiFile midi;
 
             if (stream.openedOk() && midi.readFrom (stream) && midi.getNumTracks() > 0)
                 for (const auto* holder : *midi.getTrack (0))
                     if (holder->message.isNoteOn())
-                        notes.push_back ({ (int) holder->message.getTimeStamp(), holder->message.getNoteNumber() });
+                        notes.push_back ({ (int) holder->message.getTimeStamp(), holder->message.getNoteNumber(), holder->message.getChannel() });
         }
-        check (notes.size() == 3 && notes[0] == std::make_pair (0, 36) && notes[1] == std::make_pair (960, 36)
-                   && notes[2] == std::make_pair (1920, 38), "piste exportee en MIDI : notes 36, 36, 38, une par temps");
+        std::sort (notes.begin(), notes.end());
+        check (notes.size() == 4 && notes[0] == std::array<int, 3> { 0, 36, 2 } && notes[1] == std::array<int, 3> { 0, 36, 3 }
+                   && notes[2] == std::array<int, 3> { 960, 36, 2 } && notes[3] == std::array<int, 3> { 1920, 38, 2 },
+               "montage exporte en MIDI : canal 2 pour A, canal 3 pour B");
 
-        // Avec Sync a 60 BPM, tout dure deux fois plus longtemps, a la meme hauteur
-        head.bpm = 60.0;
-        capture (t, 2);
-        t.setSyncEnabled (true);
-        t.waitForRendering (20000);
-        check (std::abs (t.getSequenceSeconds() - 3.0) < 0.001, "Sync a 60 BPM : la piste dure 3,00 s");
-        piste = readWav (t.createSequenceAudioFile(), rate);
-        check (std::abs ((double) piste.size() / rate - 3.0) < 0.005, "Sync : piste exportee de 3,00 s -> " + juce::String ((double) piste.size() / rate, 3));
-        check (std::abs (measureFrequency (piste, rate, 0.2, 0.8) - 220.0) < 4.0
-                   && std::abs (measureFrequency (piste, rate, 2.2, 2.8) - 440.0) < 6.0, "Sync : piste exportee a la bonne hauteur");
-        t.setSequencePlaying (true);
-        out = capture (t, (int) (3.0 * hostSr / 512.0));
-        check (std::abs (measureFrequency (out, hostSr, 1.2, 1.8) - 220.0) < 4.0
-                   && std::abs (measureFrequency (out, hostSr, 2.2, 2.8) - 440.0) < 6.0, "Sync : ecoute de la piste calee");
-        t.setSequencePlaying (false);
-        t.setSyncEnabled (false);
-        head.bpm = 120.0;
-        capture (t, 2);
+        // Variantes
+        t.setVariant (1);
+        check (t.getNumClips() == 0, "variante 2 : vide au depart");
+        t.copyVariant (0, 1);
+        t.removeClip (0);
+        check (t.getNumClips() == 3 && t.getNumClipsIn (0) == 4, "variantes : une copie se modifie sans toucher a l'original");
+        t.setVariant (0);
 
-        // Sauvegarde
+        // Annuler / retablir
+        const int before = t.getNumClips();
+        t.addClip (0, 1, 5.0);
+        t.addClip (0, 1, 6.0);
+        check (t.canUndo() && t.getNumClips() == before + 2, "deux blocs ajoutes");
+        t.undo();
+        check (t.getNumClips() == before + 1, "annuler : un pas en arriere");
+        t.undo();
+        check (t.getNumClips() == before && t.canRedo(), "annuler encore");
+        t.redo();
+        check (t.getNumClips() == before + 1, "retablir");
+        t.undo();
+
+        auto params = SliceParams();
+        params.pitch = 5;
+        t.setSliceParams (1, params);
+        params.pitch = 7;
+        t.setSliceParams (1, params);
+        t.undo();
+        check (t.getSlice (1).params.pitch == 0, "annuler un reglage : un potard tourne d'un geste = une seule etape");
+
+        t.getDeck (2).loadFile (steadyFile);
+        check (t.getDeck (2).hasSample(), "sample C charge");
+        t.undo();
+        check (! t.getDeck (2).hasSample() && t.getDeck (0).hasSample() && t.getNumClips() == before, "annuler un chargement");
+        t.redo();
+        check (t.getDeck (2).hasSample(), "retablir un chargement");
+        t.getDeck (2).unload();
+
+        t.removeMarker (3);
+        check (t.getNumSlices() == 3, "tranche 4 supprimee");
+        t.undo();
+        check (t.getNumSlices() == 4 && t.getSliceMode() == SliceMode::grid, "annuler une suppression de point de coupe");
+
+        // Sauvegarde du projet
+        t.setTimelineBars (4);
+        t.setSnap (8);
+        t.setVariant (1);
+        t.setNoteRepeat (16);
         juce::MemoryBlock state;
         t.getStateInformation (state);
         SiampleProcessor restored;
         restored.prepareToPlay (hostSr, 512);
         restored.setStateInformation (state.getData(), (int) state.getSize());
-        check (restored.getSequenceLength() == 3 && restored.getSequenceStep (0) == 0 && restored.getSequenceStep (2) == 2, "la piste est enregistree avec le projet");
+        check (restored.getDeck (0).getNumSlices() == 4 && restored.getDeck (1).getNumSlices() == 2 && ! restored.getDeck (2).hasSample(),
+               "projet : les samples et leurs decoupes sont restaures");
+        check (restored.getVariant() == 1 && restored.getNumClips() == 3 && restored.getNumClipsIn (0) == 4
+                   && restored.getTimelineBars() == 4 && restored.getSnap() == 8 && restored.getNoteRepeat() == 16,
+               "projet : montage, variantes, grille et note repeat restaures");
+        check (! restored.canUndo(), "projet charge : l'historique repart de zero");
 
-        // Une nouvelle découpe ne garde que les tranches qui existent encore
+        // Preset
+        const auto presetFile = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("siample_test.siample");
+        check (t.savePreset (presetFile) && presetFile.existsAsFile(), "preset enregistre");
+        SiampleProcessor fromPreset;
+        fromPreset.prepareToPlay (hostSr, 512);
+        check (fromPreset.loadPreset (presetFile).isEmpty() && fromPreset.getDeck (1).getFileName() == highFile.getFileName()
+                   && fromPreset.getNumClipsIn (0) == 4, "preset recharge dans une autre instance");
+        check (fromPreset.loadPreset (tonesFile).isNotEmpty(), "un fichier qui n'est pas un preset est refuse");
+        fromPreset.undo();
+        check (! fromPreset.getDeck (0).hasSample(), "charger un preset s'annule");
+
+        // « Dans l'ordre » et Flip
+        t.setVariant (0);
+        t.fillLane (0, false);
+        bool ordered = true;
+        int laneClips = 0;
+        for (int i = 0; i < t.getNumClips(); ++i)
+            if (t.getClip (i).deck == 0)
+            {
+                ordered = ordered && t.getClip (i).slice == laneClips && std::abs (t.getClip (i).start - (double) laneClips) < 1.0e-6
+                                  && std::abs (t.getClip (i).length - 1.0) < 1.0e-6;
+                ++laneClips;
+            }
+        check (ordered && laneClips == 4 && t.getNumClips() == 5, "Dans l'ordre : la boucle de A est posee sur sa ligne, celle de B ne bouge pas");
+
+        t.fillLane (0, true);
+        bool rhythm = true, changed = false;
+        laneClips = 0;
+        for (int i = 0; i < t.getNumClips(); ++i)
+            if (t.getClip (i).deck == 0)
+            {
+                rhythm = rhythm && std::abs (t.getClip (i).start - (double) laneClips) < 1.0e-6;
+                changed = changed || t.getClip (i).slice != laneClips;
+                ++laneClips;
+            }
+        check (rhythm && changed && laneClips == 4, "Flip : meme rythme, tranches rearrangees");
+
+        // Une nouvelle decoupe ne garde que les blocs dont la tranche existe encore
+        t.fillLane (0, false);
         t.setDivisions (2);
-        check (t.getSequenceLength() == 2 && t.getSequenceStep (1) == 0, "nouvelle decoupe en 2 : la tranche 3 quitte la piste");
-        t.clearSequence();
-        check (t.getSequenceLength() == 0 && ! t.createSequenceAudioFile().existsAsFile(), "piste videe : rien a exporter");
+        laneClips = 0;
+        for (int i = 0; i < t.getNumClips(); ++i)
+            laneClips += t.getClip (i).deck == 0 ? 1 : 0;
+        check (laneClips == 2, "nouvelle decoupe en 2 : les blocs des tranches 3 et 4 quittent le montage");
 
-        for (int i = 0; i < 70; ++i)
-            t.insertSequenceStep (i % 2);
-        check (t.getSequenceLength() == maxSequenceSteps, "piste : 64 blocs au maximum");
-        t.loadFile (file);
-        check (t.getSequenceLength() == 0, "nouveau sample : la piste repart de zero");
+        t.getDeck (1).loadFile (steadyFile);
+        check (t.getNumClips() == 2, "nouveau fichier dans B : ses blocs quittent le montage");
+
+        // Sync : le montage suit le tempo du projet
+        t.setDivisions (4);
+        t.clearClips();
+        t.addClip (0, 0, 0.0);
+        t.addClip (0, 2, 1.0);
+        head.bpm = 60.0;
+        capture (t, 2);
+        t.setSyncEnabled (true);
+        t.waitForRendering (20000);
+        check (std::abs (t.naturalBeats (0, 0) - 1.0) < 1.0e-6, "Sync : une tranche d'un temps reste d'un temps quand le projet ralentit");
+        t.setTimelinePlaying (true);
+        out = capture (t, (int) (2.2 * hostSr / 512.0));
+        t.setTimelinePlaying (false);
+        capture (t, 30);
+        check (std::abs (measureFrequency (out, hostSr, 0.2, 0.8) - 220.0) < 4.0 && std::abs (measureFrequency (out, hostSr, 1.2, 1.8) - 440.0) < 6.0,
+               "Sync a 60 BPM : chaque bloc dure une seconde, a la bonne hauteur");
+        montage = readWav (t.createTimelineAudioFile(), rate);
+        check (std::abs ((double) montage.size() / rate - 16.0) < 0.001 && std::abs (measureFrequency (montage, rate, 1.2, 1.8) - 440.0) < 6.0,
+               "Sync : export audio cale sur le tempo du projet (4 mesures a 60 BPM = 16 s) -> " + juce::String ((double) montage.size() / rate, 3) + " s, "
+                   + juce::String (measureFrequency (montage, rate, 1.2, 1.8), 1) + " Hz");
         t.setPlayHead (nullptr);
+
+        // Sans DAW, le tempo du projet se regle a la main
+        SiampleProcessor alone;
+        alone.prepareToPlay (hostSr, 512);
+        alone.setProjectBpm (93.0);
+        check (! alone.isTempoFromHost() && std::abs (alone.getHostBpm() - 93.0) < 1.0e-9, "version autonome : tempo du projet reglable a la main");
     }
 
     //==============================================================================
@@ -1111,6 +1380,52 @@ int main (int argc, char* argv[])
         t.setStateInformation (block.getData(), (int) block.getSize());
         check (t.hasSample() && t.getNumSlices() == 4 && t.getSlice (3).params.pitch == 3, "projet de la version 0.1 : tranches et reglages relus");
         check (std::abs (t.getSampleBpm() - 120.0) < 0.5 && ! t.isSyncEnabled() && ! t.isMono(), "projet de la version 0.1 : tempo detecte, nouveautes desactivees");
+
+        // Un projet de la version 0.4 : un seul sample decrit a la racine, et une « piste » 1, 1, 3
+        {
+            juce::ValueTree v4 ("Siample");
+            v4.setProperty ("version", 2, nullptr);
+            v4.setProperty ("file", tonesFile.getFullPathName(), nullptr);
+            v4.setProperty ("regionStart", 0, nullptr);
+            v4.setProperty ("regionEnd", tones.getNumSamples(), nullptr);
+            v4.setProperty ("mode", 1, nullptr);
+            v4.setProperty ("divisions", 4, nullptr);
+            v4.setProperty ("bpm", 120.0, nullptr);
+            v4.setProperty ("bpmManual", true, nullptr);
+            v4.setProperty ("hostBpm", 120.0, nullptr);
+            v4.setProperty ("mono", true, nullptr);
+            v4.setProperty ("sequence", "0,0,2", nullptr);
+            for (int i = 0; i < 4; ++i)
+            {
+                juce::ValueTree child ("Slice");
+                child.setProperty ("start", i * tones.getNumSamples() / 4, nullptr);
+                child.setProperty ("loop", i == 1, nullptr);
+                v4.appendChild (child, nullptr);
+            }
+
+            juce::MemoryBlock block4;
+            juce::AudioProcessor::copyXmlToBinary (*v4.createXml(), block4);
+            SiampleProcessor u;
+            u.prepareToPlay (48000.0, 512);
+            u.setStateInformation (block4.getData(), (int) block4.getSize());
+            check (u.getDeck (0).getNumSlices() == 4 && u.isMono() && u.getSlice (1).params.loop && ! u.getDeck (1).hasSample(),
+                   "projet de la version 0.4 : le sample devient le sample A");
+            check (u.getNumClips() == 3 && u.getClip (2).slice == 2 && std::abs (u.getClip (2).start - 2.0) < 1.0e-6,
+                   "projet de la version 0.4 : la piste 1, 1, 3 devient trois blocs du montage");
+
+            // Fichier audio disparu : la decoupe n'est pas perdue a la sauvegarde suivante
+            v4.setProperty ("file", "/nulle/part/absent.wav", nullptr);
+            juce::AudioProcessor::copyXmlToBinary (*v4.createXml(), block4);
+            SiampleProcessor missing;
+            missing.setStateInformation (block4.getData(), (int) block4.getSize());
+            juce::MemoryBlock again;
+            missing.getStateInformation (again);
+            auto reread = juce::ValueTree::fromXml (*juce::AudioProcessor::getXmlFromBinary (again.getData(), (int) again.getSize()));
+            check (! missing.hasSample() && missing.getMissingFilePath().contains ("absent.wav")
+                       && reread.getChildWithName ("Deck").getNumChildren() == 4
+                       && reread.getChildWithName ("Deck").getProperty ("file").toString().contains ("absent.wav"),
+                   "fichier audio introuvable : chemin et decoupe conserves dans le projet");
+        }
 
         // Tout modifier pendant que l'audio tourne dans un autre thread
         TestPlayHead head;
@@ -1149,7 +1464,7 @@ int main (int argc, char* argv[])
 
         while (juce::Time::getMillisecondCounter() < endTime && ! stop.load())
         {
-            switch (random.nextInt (12))
+            switch (random.nextInt (17))
             {
                 case 0:  t.setSliceMode ((SliceMode) random.nextInt (3)); break;
                 case 1:  t.setDivisions (1 << (1 + random.nextInt (6))); break;
@@ -1160,7 +1475,16 @@ int main (int argc, char* argv[])
                 case 5:  t.addMarker (random.nextInt (loop.getNumSamples())); break;
                 case 6:  t.removeMarker (random.nextInt (juce::jmax (1, t.getNumSlices()))); break;
                 case 7:  t.setRegion (random.nextInt (loop.getNumSamples() / 2), loop.getNumSamples() / 2 + random.nextInt (loop.getNumSamples() / 2)); break;
-                case 8:  t.flipPattern(); t.setPatternPlaying (random.nextBool()); break;
+                case 8:  t.fillLane (random.nextInt (4), random.nextBool()); t.setTimelinePlaying (random.nextBool()); break;
+                case 12: t.getDeck (1 + random.nextInt (3)).loadFile (random.nextBool() ? file : tonesFile); break;
+                case 13: t.addClip (random.nextInt (4), random.nextInt (8), random.nextFloat() * 8.0); t.removeClip (random.nextInt (juce::jmax (1, t.getNumClips())));
+                         t.resizeClip (random.nextInt (juce::jmax (1, t.getNumClips())), random.nextFloat() * 3.0); break;
+                case 14: if (random.nextBool()) t.undo(); else t.redo(); break;
+                case 15: { auto p = SliceParams(); p.loop = true; p.loopFade = random.nextFloat() * 200.0f; p.drive = random.nextFloat(); p.resonance = random.nextFloat();
+                           p.filter = -0.5f; t.setSliceParams (random.nextInt (juce::jmax (1, t.getNumSlices())), p);
+                           t.setNoteRepeat (random.nextBool() ? 16 : 0); t.setActiveDeck (random.nextInt (4)); break; }
+                case 16: t.getDeck (random.nextInt (4)).setTranspose (random.nextInt (13) - 6); t.setVariant (random.nextInt (3));
+                         t.setTimelineBars (1 << random.nextInt (4)); t.getDeck (random.nextInt (4)).setSyncEnabled (random.nextBool()); break;
                 case 9:  t.setPlayMode ((PlayMode) random.nextInt (2)); t.setMono (random.nextBool()); t.setSelectedSlice (random.nextInt (8)); break;
                 case 10: t.loadFile (file); t.setSyncEnabled (true); break;
                 case 11: t.audition (random.nextInt (8), random.nextBool()); t.setSampleBpm (60.0 + random.nextInt (120)); break;
@@ -1187,7 +1511,7 @@ int main (int argc, char* argv[])
         proc.setDivisions (8);
 
         std::unique_ptr<juce::AudioProcessorEditor> editor (proc.createEditorAndMakeActive());
-        editor->setSize (1020, 770);
+        editor->setSize (1120, 800);
 
         WaveformView* wave = nullptr;
         for (auto* child : editor->getChildren())
@@ -1275,6 +1599,89 @@ int main (int argc, char* argv[])
             run (proc, 60);
         }
 
+        // Le montage : poser, deplacer, raccourcir, retirer un bloc a la souris
+        auto* siampleEditor = dynamic_cast<SiampleEditor*> (editor.get());
+        TimelineView* timeline = nullptr;
+        PadGrid* padGrid = nullptr;
+        for (auto* child : editor->getChildren())
+        {
+            if (auto* v = dynamic_cast<TimelineView*> (child))  timeline = v;
+            if (auto* g = dynamic_cast<PadGrid*> (child))        padGrid = g;
+        }
+
+        check (siampleEditor != nullptr && timeline != nullptr && padGrid != nullptr, "montage present dans l'editeur");
+
+        if (siampleEditor != nullptr && timeline != nullptr && padGrid != nullptr)
+        {
+            siampleEditor->showMontage (true);
+            check (timeline->isVisible() && wave != nullptr && ! wave->isVisible(), "vue Montage : le montage remplace la forme d'onde");
+
+            proc.setActiveDeck (0);
+            proc.clearClips();
+            proc.setTimelineBars (2);
+            proc.setSnap (16);
+
+            auto source = juce::Desktop::getInstance().getMainMouseSource();
+            const float left = 34.0f, width = (float) timeline->getWidth() - 34.0f - 4.0f;
+            const float laneY = 18.0f + ((float) timeline->getHeight() - 21.0f) / 8.0f;   // milieu de la ligne A
+            auto xAt = [&] (double beats) { return left + (float) (beats / 8.0) * width; };
+
+            auto event = [&] (float x, float y, float downX, float downY, bool rightButton = false, int clicks = 1, bool dragged = false)
+            {
+                return juce::MouseEvent (source, { x, y },
+                                         rightButton ? juce::ModifierKeys::rightButtonModifier : juce::ModifierKeys::leftButtonModifier,
+                                         0.5f, 0.0f, 0.0f, 0.0f, 0.0f, timeline, timeline, juce::Time::getCurrentTime(),
+                                         { downX, downY }, juce::Time::getCurrentTime(), clicks, dragged);
+            };
+
+            // Deposer le pad 3 vers le temps 2 (un peu apres : il s'aimante a la grille)
+            juce::DragAndDropTarget::SourceDetails drop ("slice:0:2", padGrid, { (int) xAt (2.1), (int) laneY });
+            check (timeline->isInterestedInDragSource (drop), "le montage accepte un pad");
+            timeline->itemDragEnter (drop);
+            timeline->itemDropped (drop);
+            check (proc.getNumClips() == 1 && proc.getClip (0).slice == 2 && std::abs (proc.getClip (0).start - 2.0) < 1.0e-6,
+                   "glisser un pad : un bloc est pose, aimante a la grille");
+
+            // Le deplacer au temps 4
+            const double grab = 2.3;
+            timeline->mouseDown (event (xAt (grab), laneY, xAt (grab), laneY));
+            check (run (proc, 3)[0] > 0.001f, "clic sur un bloc : on l'entend");
+            timeline->mouseDrag (event (xAt (grab + 2.0), laneY, xAt (grab), laneY, false, 1, true));
+            timeline->mouseUp (event (xAt (grab + 2.0), laneY, xAt (grab), laneY, false, 1, true));
+            check (std::abs (proc.getClip (0).start - 4.0) < 1.0e-6, "glisser un bloc : il se deplace -> " + juce::String (proc.getClip (0).start, 3));
+            run (proc, 60);
+
+            // Tirer son bord droit jusqu'au temps 5,5
+            const double length = proc.getClip (0).length;
+            const float edge = xAt (4.0 + length) - 2.0f;
+            timeline->mouseDown (event (edge, laneY, edge, laneY));
+            timeline->mouseDrag (event (xAt (5.5), laneY, edge, laneY, false, 1, true));
+            timeline->mouseUp (event (xAt (5.5), laneY, edge, laneY, false, 1, true));
+            check (std::abs (proc.getClip (0).length - 1.5) < 1.0e-6 && std::abs (proc.getClip (0).start - 4.0) < 1.0e-6,
+                   "tirer le bord droit : la duree change -> " + juce::String (proc.getClip (0).length, 3));
+
+            // Double-clic dans le vide : pose la tranche selectionnee
+            proc.setSelectedSlice (5);
+            timeline->mouseDoubleClick (event (xAt (0.3), laneY, xAt (0.3), laneY, false, 2));
+            check (proc.getNumClips() == 2 && proc.getClip (1).slice == 5 && std::abs (proc.getClip (1).start - 0.25) < 1.0e-6,
+                   "double-clic : pose la tranche selectionnee");
+
+            // Clic droit : retire le bloc
+            timeline->mouseDown (event (xAt (4.5), laneY, xAt (4.5), laneY, true));
+            timeline->mouseUp (event (xAt (4.5), laneY, xAt (4.5), laneY, true));
+            check (proc.getNumClips() == 1 && proc.getClip (0).slice == 5, "clic droit : retire le bloc");
+
+            // Clic sur la lettre d'une ligne : affiche ce sample
+            const float laneB = laneY + ((float) timeline->getHeight() - 21.0f) / 4.0f;
+            timeline->mouseDown (event (12.0f, laneB, 12.0f, laneB));
+            timeline->mouseUp (event (12.0f, laneB, 12.0f, laneB));
+            check (proc.getActiveDeck() == 1, "clic sur la lettre B : le sample B s'affiche");
+            proc.setActiveDeck (0);
+            proc.clearClips();
+            siampleEditor->showMontage (false);
+            run (proc, 60);
+        }
+
         proc.editorBeingDeleted (editor.get());
     }
 
@@ -1282,21 +1689,22 @@ int main (int argc, char* argv[])
     std::cout << "Interface" << std::endl;
     {
         SiampleProcessor empty;
-        saveSnapshot (empty, outDir.getChildFile ("siample_vide.png"), 1020, 860);
+        saveSnapshot (empty, outDir.getChildFile ("siample_vide.png"), 1120, 800);
     }
 
     proc.setRegion (0, loop.getNumSamples());
+    proc.setSliceMode (SliceMode::transients);
     proc.setSelectedSlice (2);
     run (proc, 2, noteOn (38));
-    saveSnapshot (proc, outDir.getChildFile ("siample_transitoires.png"), 1020, 860);
+    saveSnapshot (proc, outDir.getChildFile ("siample_decoupe.png"), 1120, 800);
     run (proc, 60);
 
     proc.setSliceMode (SliceMode::grid);
     proc.setDivisions (32);
     proc.setSelectedSlice (20);
-    saveSnapshot (proc, outDir.getChildFile ("siample_grille_min.png"), 900, 740);
+    saveSnapshot (proc, outDir.getChildFile ("siample_grille_min.png"), 1040, 720);
 
-    // Toutes les nouveautés actives : Sync, tempo saisi à la main, clavier, mono, Flip, grain
+    // Le montage : deux samples, Sync, des blocs sur deux lignes, une tranche reglee
     {
         TestPlayHead head;
         head.bpm = 96.0;
@@ -1305,28 +1713,43 @@ int main (int argc, char* argv[])
         run (proc, 2);
         proc.setSampleBpm (120.0);
         proc.setSyncEnabled (true);
-        proc.waitForRendering (20000);
-        proc.setPlayMode (PlayMode::keys);
-        proc.setMono (true);
-        proc.flipPattern();
+        proc.getDeck (1).loadFile (tonesFile);
+        proc.getDeck (1).setSliceMode (SliceMode::grid);
+        proc.getDeck (1).setDivisions (4);
+        proc.getDeck (1).setSampleBpm (120.0);
+        proc.getDeck (1).setSyncEnabled (true);
         *proc.getGrainParameter() = 35.0f;
         auto params = SliceParams();
         params.pitch = 5;
         params.filter = -0.4f;
+        params.resonance = 0.5f;
+        params.drive = 0.3f;
+        params.decay = 0.12f;
+        params.sustain = 0.7f;
+        params.release = 0.08f;
         params.loop = true;
+        params.loopFade = 30.0f;
         proc.setSelectedSlice (5);
         proc.setSliceParams (5, params);
         proc.waitForRendering (20000);
-        for (int step : { 0, 0, 2, 5, 2, 7 })
-            proc.insertSequenceStep (step);
-        proc.setSequencePlaying (true);
-        run (proc, 30);
-        saveSnapshot (proc, outDir.getChildFile ("siample_sync.png"), 1020, 860);
-        proc.setSequencePlaying (false);
+        proc.clearClips();
+        proc.setTimelineBars (2);
+        proc.fillLane (0, false);
+        for (auto [slice, start] : { std::pair<int, double> { 0, 0.0 }, { 2, 2.0 }, { 0, 4.0 }, { 3, 6.0 } })
+            proc.addClip (1, slice, start, slice == 3 ? 2.0 : -1.0);
+        proc.resizeClip (3, 1.5);
+        proc.setTimelinePlaying (true);
+        run (proc, 100);
+        proc.setShownView (1);
+        saveSnapshot (proc, outDir.getChildFile ("siample_montage.png"), 1120, 800);
+        saveSnapshot (proc, outDir.getChildFile ("siample_navigateur.png"), 1120, 800, true);
+        proc.setShownView (0);
+        saveSnapshot (proc, outDir.getChildFile ("siample_sync.png"), 1120, 800);
+        proc.setTimelinePlaying (false);
         run (proc, 80);
         proc.setPlayHead (nullptr);
     }
-    check (outDir.getChildFile ("siample_transitoires.png").getSize() > 5000, "captures d'ecran ecrites dans " + outDir.getFullPathName());
+    check (outDir.getChildFile ("siample_montage.png").getSize() > 5000, "captures d'ecran ecrites dans " + outDir.getFullPathName());
 
     std::cout << std::endl << (failures == 0 ? "TOUS LES TESTS PASSENT" : juce::String (failures) + " ECHEC(S)") << std::endl;
     return failures == 0 ? 0 : 1;
